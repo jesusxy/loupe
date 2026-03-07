@@ -1,0 +1,7 @@
+# binary
+loupe
+
+# Go
+*.test
+*.out
+vendor/
