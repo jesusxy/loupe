@@ -38,18 +38,31 @@ func main() {
 	plaintext := []byte{0x41, 0x42, 0x43, 0x44}
 	shellcode := []byte{0x48, 0xC7, 0xC6, 0x00, 0x00, 0x00, 0x03, 0x48, 0xC7, 0xC1, 0x04, 0x00, 0x00, 0x00, 0x80, 0x36, 0xAA, 0x48, 0xFF, 0xC6, 0xE2, 0xF8, 0xF4}
 
+	codeRegion := regions[0]
+	stackRegion := regions[1]
 	dataRegion := regions[2]
+
 	encrypted := xorEncrypt(plaintext, 0xAA)
 	if err = uc.MemWrite(dataRegion.Base, encrypted); err != nil {
 		log.Fatalf("Failed to write encrypted payload: %v", err)
 	}
 
-	err = loadCode(uc, regions[0], shellcode)
+	err = addInstrHook(uc, codeRegion)
+	if err != nil {
+		log.Fatalf("Failed to add Instruction Hook: %v", err)
+	}
+
+	err = addMemHook(uc)
+	if err != nil {
+		log.Fatalf("Failed to add Mem Hook: %v", err)
+	}
+
+	err = loadCode(uc, codeRegion, shellcode)
 	if err != nil {
 		log.Fatalf("Failed to load code into memory: %v", err)
 	}
 
-	err = executeCode(uc, regions[0], regions[1], len(shellcode))
+	err = executeCode(uc, codeRegion, stackRegion, len(shellcode))
 	if err != nil {
 		log.Fatalf("Failed to execute code: %v", err)
 	}
@@ -174,4 +187,26 @@ func findRegion(regions []MemRegion, label string) (MemRegion, bool) {
 	}
 
 	return MemRegion{}, false
+}
+
+// ------------ HOOKS ----------------- //
+
+func addInstrHook(uc unicorn.Unicorn, codeRegion MemRegion) error {
+	_, err := uc.HookAdd(unicorn.HOOK_CODE, func(uc unicorn.Unicorn, addr uint64, size uint32) {
+		fmt.Printf("[trace] 0x%x (%d bytes)\n", addr, size)
+	}, codeRegion.Base, codeRegion.Base+codeRegion.Size)
+
+	return err
+}
+
+func addMemHook(uc unicorn.Unicorn) error {
+	_, err := uc.HookAdd(unicorn.HOOK_MEM_READ|unicorn.HOOK_MEM_WRITE, func(uc unicorn.Unicorn, access int, addr uint64, size int, value int64) {
+		if access == unicorn.MEM_WRITE {
+			fmt.Printf("[mem write] 0x%x (%d bytes) val=0x%x\n", addr, size, value)
+		} else {
+			fmt.Printf("[mem read] 0x%x (%d bytes)\n", addr, size)
+		}
+	}, 1, 0)
+
+	return err
 }
