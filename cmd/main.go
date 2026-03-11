@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"log"
-	"os"
 
 	"github.com/unicorn-engine/unicorn/bindings/go/unicorn"
 )
@@ -22,6 +21,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to initialize the emulator %v", err)
 	}
+	defer uc.Close()
 
 	fmt.Println("Successfully initialized X86-64 emulator")
 
@@ -81,13 +81,6 @@ func main() {
 	fmt.Printf("encrypted input: 	%x\n", encrypted)
 	fmt.Printf("dumped output: 		%x\n", data)
 	fmt.Printf("as string:			%s\n", data)
-
-	if err = uc.Close(); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to close emulator %v\n", err)
-		os.Exit(1)
-	}
-
-	fmt.Println("Emulator closed cleanly")
 
 }
 
