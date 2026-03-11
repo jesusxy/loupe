@@ -70,3 +70,29 @@ dumped output:          41424344
 as string:                      ABCD
 Emulator closed cleanly
 ```
+
+---
+
+How does the emulator even know execution has reached VirtualAlloc? What hook catches a CALL to a specific address, and what do you have to do after handling it to keep execution from dying?
+
+Think about what happens to the instruction pointer and the stack when a CALL executes — what does the CPU do mechanically, and what does your hook need to undo or advance to keep things moving?
+
+When `CALL 0x5000010` executes the CPU does exactly two things:
+
+`PUSHes` the return address onto the stack — the address of the instruction right after the `CALL`, so execution knows where to come back to
+Moves `RIP` to `0x5000010` — the target address
+
+No explicit `JMP` needed — CA`LL does both atomically.
+
+Now in our sandbox, `RIP` lands at `0x5000010`. There's no real function there. Our hook fires. We fake the return value by writing to `RAX`.
+But here's the part you're missing — how do we return from the fake function?
+In a real function, `RET` would:
+
+`POP` the return address off the stack
+Jump back to it
+
+But we have no real `RET` instruction to execute. So our hook has to manually simulate what `RET` does:
+
+Read the return address off the stack — it's sitting at [RSP]
+Set `RIP` to that address
+Advance `RSP` by 8 — same as a `POP`
