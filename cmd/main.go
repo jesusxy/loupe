@@ -57,6 +57,11 @@ func main() {
 		log.Fatalf("Failed to add Mem Hook: %v", err)
 	}
 
+	err = addInvalidMemHook(uc)
+	if err != nil {
+		log.Fatalf("Failed to add Invalid Memory Hook: %v", err)
+	}
+
 	err = loadCode(uc, codeRegion, shellcode)
 	if err != nil {
 		log.Fatalf("Failed to load code into memory: %v", err)
@@ -206,6 +211,23 @@ func addMemHook(uc unicorn.Unicorn) error {
 		} else {
 			fmt.Printf("[mem read] 0x%x (%d bytes)\n", addr, size)
 		}
+	}, 1, 0)
+
+	return err
+}
+
+func addInvalidMemHook(uc unicorn.Unicorn) error {
+	_, err := uc.HookAdd(unicorn.HOOK_MEM_UNMAPPED, func(uc unicorn.Unicorn, access int, addr uint64, size int, value int64) {
+		accessType := "unknown"
+		switch access {
+		case unicorn.MEM_READ_UNMAPPED:
+			accessType = "read"
+		case unicorn.MEM_WRITE_UNMAPPED:
+			accessType = "write"
+		case unicorn.MEM_FETCH_UNMAPPED:
+			accessType = "fetch"
+		}
+		fmt.Printf("[mem invalid] type=%s addr=0x%x size=%d\n", accessType, addr, size)
 	}, 1, 0)
 
 	return err
