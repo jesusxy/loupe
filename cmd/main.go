@@ -14,6 +14,16 @@ type MemRegion struct {
 	Label string // "code", "stack", "heap" - useful for TUI display later
 }
 
+type ImportStub struct {
+	Name    string
+	Address uint64
+}
+
+type ImportTable struct {
+	ByAddress map[uint64]string
+	ByName    map[string]uint64
+}
+
 func main() {
 	fmt.Println("Initializing the emulator...")
 
@@ -132,6 +142,19 @@ func setupMem(uc unicorn.Unicorn) ([]MemRegion, error) {
 
 	memRegions = append(memRegions, *dataRegion)
 
+	// call the import table func
+	importTableRegion := &MemRegion{
+		Base:  0x4000000,
+		Size:  0x1000,
+		Perms: unicorn.PROT_READ | unicorn.PROT_EXEC,
+		Label: "importTable",
+	}
+
+	err = uc.MemMapProt(importTableRegion.Base, importTableRegion.Size, int(importTableRegion.Perms))
+	if err != nil {
+		return nil, fmt.Errorf("failed to map import table region: %w", err)
+	}
+
 	fmt.Println("Successfully mapped memory regions")
 	return memRegions, nil
 }
@@ -185,6 +208,23 @@ func findRegion(regions []MemRegion, label string) (MemRegion, bool) {
 	}
 
 	return MemRegion{}, false
+}
+
+func buildImportTable(base uint64) ImportTable {
+	apiNames := []string{"VirtualAlloc", "VirtualProtect", "LoadLibraryA", "GetProcAddress"}
+	importTable := ImportTable{
+		ByAddress: make(map[uint64]string),
+		ByName:    make(map[string]uint64),
+	}
+
+	for i, api := range apiNames {
+		addr := base + (uint64(i) * 8)
+		importTable.ByAddress[addr] = api
+		importTable.ByName[api] = addr
+
+	}
+
+	return importTable
 }
 
 // ------------ HOOKS ----------------- //
