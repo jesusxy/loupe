@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/binary"
 	"fmt"
 	"log"
 
@@ -46,11 +47,18 @@ func main() {
 	}
 
 	plaintext := []byte{0x41, 0x42, 0x43, 0x44}
-	shellcode := []byte{0x48, 0xC7, 0xC6, 0x00, 0x00, 0x00, 0x03, 0x48, 0xC7, 0xC1, 0x04, 0x00, 0x00, 0x00, 0x80, 0x36, 0xAA, 0x48, 0xFF, 0xC6, 0xE2, 0xF8, 0xF4}
+	shellcode := []byte{0x48, 0xC7, 0xC0, 0x00, 0x00, 0x00, 0x04, 0xFF, 0xD0, 0xF4}
 
 	codeRegion := regions[0]
 	stackRegion := regions[1]
 	dataRegion := regions[2]
+	importRegion := regions[3]
+
+	importTable := buildImportTable(importRegion.Base)
+
+	for addr, api := range importTable.ByAddress {
+		fmt.Printf("[import] addr=0x%x api=%s\n", addr, api)
+	}
 
 	encrypted := xorEncrypt(plaintext, 0xAA)
 	if err = uc.MemWrite(dataRegion.Base, encrypted); err != nil {
@@ -70,6 +78,11 @@ func main() {
 	err = addInvalidMemHook(uc)
 	if err != nil {
 		log.Fatalf("Failed to add Invalid Memory Hook: %v", err)
+	}
+
+	err = addAPIHook(uc, importTable, importRegion)
+	if err != nil {
+		log.Fatalf("Failed to add API Hook: %v", err)
 	}
 
 	err = loadCode(uc, codeRegion, shellcode)
@@ -137,7 +150,7 @@ func setupMem(uc unicorn.Unicorn) ([]MemRegion, error) {
 
 	err = uc.MemMapProt(dataRegion.Base, dataRegion.Size, int(dataRegion.Perms))
 	if err != nil {
-		return nil, fmt.Errorf("failed to map code region: %w", err)
+		return nil, fmt.Errorf("failed to map data region: %w", err)
 	}
 
 	memRegions = append(memRegions, *dataRegion)
@@ -147,13 +160,15 @@ func setupMem(uc unicorn.Unicorn) ([]MemRegion, error) {
 		Base:  0x4000000,
 		Size:  0x1000,
 		Perms: unicorn.PROT_READ | unicorn.PROT_EXEC,
-		Label: "importTable",
+		Label: "imports",
 	}
 
 	err = uc.MemMapProt(importTableRegion.Base, importTableRegion.Size, int(importTableRegion.Perms))
 	if err != nil {
 		return nil, fmt.Errorf("failed to map import table region: %w", err)
 	}
+
+	memRegions = append(memRegions, *importTableRegion)
 
 	fmt.Println("Successfully mapped memory regions")
 	return memRegions, nil
@@ -211,6 +226,7 @@ func findRegion(regions []MemRegion, label string) (MemRegion, bool) {
 }
 
 func buildImportTable(base uint64) ImportTable {
+	// LoadLibraryW, URLDownloadToFileW ?
 	apiNames := []string{"VirtualAlloc", "VirtualProtect", "LoadLibraryA", "GetProcAddress"}
 	importTable := ImportTable{
 		ByAddress: make(map[uint64]string),
@@ -260,8 +276,46 @@ func addInvalidMemHook(uc unicorn.Unicorn) error {
 		case unicorn.MEM_FETCH_UNMAPPED:
 			accessType = "fetch"
 		}
+		rax, _ := uc.RegRead(unicorn.X86_REG_RAX)
+		rsp, _ := uc.RegRead(unicorn.X86_REG_RSP)
+		rip, _ := uc.RegRead(unicorn.X86_REG_RIP)
 		fmt.Printf("[mem invalid] type=%s addr=0x%x size=%d\n", accessType, addr, size)
+		fmt.Printf("[registers] RAX=0x%x RSP=0x%x RIP=0x%x", rax, rsp, rip)
 	}, 1, 0)
+
+	return err
+}
+
+func addAPIHook(uc unicorn.Unicorn, importTable ImportTable, importRegion MemRegion) error {
+	_, err := uc.HookAdd(unicorn.HOOK_CODE, func(uc unicorn.Unicorn, addr uint64, size uint32) {
+		api := importTable.ByAddress[addr]
+
+		// write a fake return val to RAX
+		if err := uc.RegWrite(unicorn.X86_REG_RAX, 0x1); err != nil {
+			fmt.Printf("failed to write fake return val to RAX register: %v", err)
+		}
+
+		// simulate RET manually
+		rsp, _ := uc.RegRead(unicorn.X86_REG_RSP) // rsp holds an address not data
+		b, err := uc.MemRead(rsp, 8)              // read the memory at the address returned from rsp, this is our return addr
+		if err != nil {
+			fmt.Printf("Failed to read from RSP register: %v", err)
+		}
+
+		retAddr := binary.LittleEndian.Uint64(b)
+		err = uc.RegWrite(unicorn.X86_REG_RIP, retAddr) // resume execution at this addr after CALL
+		if err != nil {
+			fmt.Printf("failed to write return addr to RIP register")
+		}
+
+		fmt.Printf("[api] Intercepted api: %s addr=0x%x ret=0x%x RAX=0x1\n", api, addr, retAddr)
+
+		err = uc.RegWrite(unicorn.X86_REG_RSP, rsp+8) // increment SP
+		if err != nil {
+			fmt.Printf("failed to advance RSP: %v", err)
+		}
+
+	}, importRegion.Base, importRegion.Base+importRegion.Size)
 
 	return err
 }
