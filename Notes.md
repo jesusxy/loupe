@@ -96,3 +96,17 @@ But we have no real `RET` instruction to execute. So our hook has to manually si
 Read the return address off the stack — it's sitting at [RSP]
 Set `RIP` to that address
 Advance `RSP` by 8 — same as a `POP`
+
+---
+
+Inside the callback you need to:
+
+Look up `addr` in `importTable.ByAddress` to get the API name
+Log which API was intercepted
+Write a fake return value into RAX via RegWrite
+Simulate RET manually:
+
+- Read 8 bytes from [RSP] with MemRead — that's the return address
+- Convert those bytes to a uint64
+- Write that value into RIP via RegWrite
+- Advance RSP by 8 via RegWrite
