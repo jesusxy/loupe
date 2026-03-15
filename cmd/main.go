@@ -1,6 +1,7 @@
 package main
 
 import (
+	"debug/pe"
 	"encoding/binary"
 	"fmt"
 	"log"
@@ -44,6 +45,11 @@ func main() {
 
 	for _, r := range regions {
 		fmt.Printf("[%s] base=0x%x size=0x%x perms=%d\n", r.Label, r.Base, r.Size, r.Perms)
+	}
+
+	err = parsePE("testdata/test.exe")
+	if err != nil {
+		log.Fatalf("Failed to parse PE file: %v", err)
 	}
 
 	plaintext := []byte{0x41, 0x42, 0x43, 0x44}
@@ -108,67 +114,18 @@ func main() {
 }
 
 func setupMem(uc unicorn.Unicorn) ([]MemRegion, error) {
-	var memRegions []MemRegion
-
-	// code { baseAddr: 0x1000000, size: 0x1000, perms: READ+EXEC}
-	// map code region
-	codeRegion := &MemRegion{
-		Base:  0x1000000,
-		Size:  0x1000,
-		Perms: unicorn.PROT_READ | unicorn.PROT_EXEC,
-		Label: "code",
-	}
-	err := uc.MemMapProt(codeRegion.Base, codeRegion.Size, int(codeRegion.Perms))
-	if err != nil {
-		return nil, fmt.Errorf("failed to map code region: %w", err)
+	memRegions := []MemRegion{
+		{Base: 0x1000000, Size: 0x1000, Perms: unicorn.PROT_READ | unicorn.PROT_EXEC, Label: "code"},
+		{Base: 0x2000000, Size: 0x1000, Perms: unicorn.PROT_READ | unicorn.PROT_WRITE, Label: "stack"},
+		{Base: 0x3000000, Size: 0x1000, Perms: unicorn.PROT_READ | unicorn.PROT_WRITE, Label: "data"},
+		{Base: 0x4000000, Size: 0x1000, Perms: unicorn.PROT_READ | unicorn.PROT_EXEC, Label: "imports"},
 	}
 
-	memRegions = append(memRegions, *codeRegion)
-
-	stackRegion := &MemRegion{
-		Base:  0x2000000,
-		Size:  0x1000,
-		Perms: unicorn.PROT_READ | unicorn.PROT_WRITE,
-		Label: "stack",
+	for _, r := range memRegions {
+		if err := uc.MemMapProt(r.Base, r.Size, int(r.Perms)); err != nil {
+			return nil, fmt.Errorf("failed to map %s region: %w", r.Label, err)
+		}
 	}
-
-	// stack { baseAddr: 0x2000000, size: 0x1000, perms: READ+WRITE}
-	// map stack
-	err = uc.MemMapProt(stackRegion.Base, stackRegion.Size, int(stackRegion.Perms))
-	if err != nil {
-		return nil, fmt.Errorf("failed to map code region: %w", err)
-	}
-
-	memRegions = append(memRegions, *stackRegion)
-
-	dataRegion := &MemRegion{
-		Base:  0x3000000,
-		Size:  0x1000,
-		Perms: unicorn.PROT_READ | unicorn.PROT_WRITE,
-		Label: "data",
-	}
-
-	err = uc.MemMapProt(dataRegion.Base, dataRegion.Size, int(dataRegion.Perms))
-	if err != nil {
-		return nil, fmt.Errorf("failed to map data region: %w", err)
-	}
-
-	memRegions = append(memRegions, *dataRegion)
-
-	// call the import table func
-	importTableRegion := &MemRegion{
-		Base:  0x4000000,
-		Size:  0x1000,
-		Perms: unicorn.PROT_READ | unicorn.PROT_EXEC,
-		Label: "imports",
-	}
-
-	err = uc.MemMapProt(importTableRegion.Base, importTableRegion.Size, int(importTableRegion.Perms))
-	if err != nil {
-		return nil, fmt.Errorf("failed to map import table region: %w", err)
-	}
-
-	memRegions = append(memRegions, *importTableRegion)
 
 	fmt.Println("Successfully mapped memory regions")
 	return memRegions, nil
@@ -326,4 +283,28 @@ func addAPIHook(uc unicorn.Unicorn, importTable ImportTable, importRegion MemReg
 	}, importRegion.Base, importRegion.Base+importRegion.Size)
 
 	return err
+}
+
+// ------------- PE File ---------------- //
+func parsePE(path string) error {
+	f, err := pe.Open(path)
+	if err != nil {
+		return fmt.Errorf("failed to open PE file: %w\n", err)
+	}
+	defer f.Close()
+
+	fmt.Printf("[pe] Number of Sections in file %d\n", f.FileHeader.NumberOfSections)
+	oh, ok := f.OptionalHeader.(*pe.OptionalHeader64)
+	if !ok {
+		return fmt.Errorf("not a 64-bit PE")
+	}
+
+	fmt.Printf("[pe] Image Base: 0x%x\n", oh.ImageBase)
+	fmt.Printf("[pe] Entry point of PE: 0x%x\n", oh.AddressOfEntryPoint)
+
+	for _, section := range f.Sections {
+		fmt.Printf("[pe] Section name:%-8s - va:0x%x\n", section.Name, section.VirtualAddress)
+	}
+
+	return nil
 }
