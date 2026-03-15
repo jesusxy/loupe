@@ -54,7 +54,7 @@ func main() {
 	dataRegion := regions[2]
 	importRegion := regions[3]
 
-	importTable := buildImportTable(importRegion.Base)
+	importTable := buildImportTable(uc, importRegion.Base)
 
 	for addr, api := range importTable.ByAddress {
 		fmt.Printf("[import] addr=0x%x api=%s\n", addr, api)
@@ -225,7 +225,7 @@ func findRegion(regions []MemRegion, label string) (MemRegion, bool) {
 	return MemRegion{}, false
 }
 
-func buildImportTable(base uint64) ImportTable {
+func buildImportTable(uc unicorn.Unicorn, base uint64) ImportTable {
 	// LoadLibraryW, URLDownloadToFileW ?
 	apiNames := []string{"VirtualAlloc", "VirtualProtect", "LoadLibraryA", "GetProcAddress"}
 	importTable := ImportTable{
@@ -235,6 +235,11 @@ func buildImportTable(base uint64) ImportTable {
 
 	for i, api := range apiNames {
 		addr := base + (uint64(i) * 8)
+		err := uc.MemWrite(addr, []byte{0xC3})
+		if err != nil {
+			fmt.Printf("Failed to write RET stub to addr: 0x%x - %v\n", addr, err)
+		}
+
 		importTable.ByAddress[addr] = api
 		importTable.ByName[api] = addr
 
@@ -288,7 +293,10 @@ func addInvalidMemHook(uc unicorn.Unicorn) error {
 
 func addAPIHook(uc unicorn.Unicorn, importTable ImportTable, importRegion MemRegion) error {
 	_, err := uc.HookAdd(unicorn.HOOK_CODE, func(uc unicorn.Unicorn, addr uint64, size uint32) {
-		api := importTable.ByAddress[addr]
+		api, ok := importTable.ByAddress[addr]
+		if !ok {
+			return
+		}
 
 		// write a fake return val to RAX
 		if err := uc.RegWrite(unicorn.X86_REG_RAX, 0x1); err != nil {
