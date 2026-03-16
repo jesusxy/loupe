@@ -47,9 +47,15 @@ func main() {
 		fmt.Printf("[%s] base=0x%x size=0x%x perms=%d\n", r.Label, r.Base, r.Size, r.Perms)
 	}
 
-	err = parsePE("testdata/test.exe")
+	f, err := parsePE("testdata/test.exe")
 	if err != nil {
 		log.Fatalf("Failed to parse PE file: %v", err)
+	}
+	defer f.Close()
+
+	err = loadPESections(uc, f.Sections, 0x400000)
+	if err != nil {
+		log.Fatalf("Failed to load PE Sections: %v", err)
 	}
 
 	plaintext := []byte{0x41, 0x42, 0x43, 0x44}
@@ -286,17 +292,16 @@ func addAPIHook(uc unicorn.Unicorn, importTable ImportTable, importRegion MemReg
 }
 
 // ------------- PE File ---------------- //
-func parsePE(path string) error {
+func parsePE(path string) (*pe.File, error) {
 	f, err := pe.Open(path)
 	if err != nil {
-		return fmt.Errorf("failed to open PE file: %w\n", err)
+		return nil, fmt.Errorf("failed to open PE file: %w\n", err)
 	}
-	defer f.Close()
 
 	fmt.Printf("[pe] Number of Sections in file %d\n", f.FileHeader.NumberOfSections)
 	oh, ok := f.OptionalHeader.(*pe.OptionalHeader64)
 	if !ok {
-		return fmt.Errorf("not a 64-bit PE")
+		return nil, fmt.Errorf("not a 64-bit PE")
 	}
 
 	fmt.Printf("[pe] Image Base: 0x%x\n", oh.ImageBase)
@@ -304,6 +309,43 @@ func parsePE(path string) error {
 
 	for _, section := range f.Sections {
 		fmt.Printf("[pe] Section name:%-8s - va:0x%x\n", section.Name, section.VirtualAddress)
+	}
+
+	return f, nil
+}
+
+func loadPESections(uc unicorn.Unicorn, sections []*pe.Section, imageBase uint64) error {
+	permsByName := map[string]int{
+		".text":  unicorn.PROT_READ | unicorn.PROT_EXEC,
+		".data":  unicorn.PROT_READ | unicorn.PROT_WRITE,
+		".rdata": unicorn.PROT_READ,
+		".idata": unicorn.PROT_READ | unicorn.PROT_WRITE,
+	}
+
+	for _, section := range sections {
+		perms, ok := permsByName[section.Name]
+		if !ok {
+			fmt.Printf("[pe] Skipping section %-8s\n", section.Name)
+			continue // skip sections we dont care about
+		}
+
+		alignedSize := (uint64(section.VirtualSize) + 0xFFF) & ^uint64(0xFFF)
+		mapAddr := imageBase + uint64(section.VirtualAddress)
+
+		if err := uc.MemMapProt(mapAddr, alignedSize, perms); err != nil {
+			return fmt.Errorf("failed to map section %s at 0x%x: %w", section.Name, mapAddr, err)
+		}
+
+		data, err := section.Data()
+		if err != nil {
+			return fmt.Errorf("failed to read section %s data: %w", section.Name, err)
+		}
+
+		if err := uc.MemWrite(mapAddr, data); err != nil {
+			return fmt.Errorf("failed to write section %s to memory: %w", section.Name, err)
+		}
+
+		fmt.Printf("[pe] Loaded %-8s addr=0x%x size=0x%x (aligned=0x%x) perms=0x%x\n", section.Name, mapAddr, section.VirtualSize, alignedSize, perms)
 	}
 
 	return nil
