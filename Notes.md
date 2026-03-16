@@ -110,3 +110,21 @@ Simulate RET manually:
 - Convert those bytes to a uint64
 - Write that value into RIP via RegWrite
 - Advance RSP by 8 via RegWrite
+
+```
+0x400000 + 0x1000 → .text (code from the actual PE)
+0x400000 + 0x3000 → .data
+0x400000 + 0x4000 → .rdata
+0x400000 + 0x8000 → .idata (import table we'll patch)
+0x2000000 → stack (we keep this)
+```
+
+The formula is:
+
+```
+go(uint64(section.VirtualSize) + 0xFFF) & ^uint64(0xFFF)
+```
+
+Step 1 is adding 0xFFF. This bumps the value up so that anything not already page aligned crosses into the next page boundary. So 0x1500 plus 0xFFF gives you 0x249FF.
+
+Step 2 is the AND with the NOT of 0xFFF. The NOT of 0xFFF flips all the bits, which zeroes out the bottom 12 bits when you AND with it. This rounds the value down to the nearest page boundary. So 0x249FF becomes 0x24000.
