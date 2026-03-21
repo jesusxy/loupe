@@ -350,3 +350,5 @@ func loadPESections(uc unicorn.Unicorn, sections []*pe.Section, imageBase uint64
 
 	return nil
 }
+
+func patchIAT(uc unicorn.Unicorn, f *pe.File, imageBase uint64, importTable ImportTable) error {}
