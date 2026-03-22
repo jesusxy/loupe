@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"debug/pe"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"log"
 
 	"github.com/unicorn-engine/unicorn/bindings/go/unicorn"
@@ -315,7 +317,7 @@ func parsePE(path string) (*pe.File, error) {
 }
 
 func loadPESections(uc unicorn.Unicorn, sections []*pe.Section, imageBase uint64) error {
-	permsByName := map[string]int{
+	permsBySection := map[string]int{
 		".text":  unicorn.PROT_READ | unicorn.PROT_EXEC,
 		".data":  unicorn.PROT_READ | unicorn.PROT_WRITE,
 		".rdata": unicorn.PROT_READ,
@@ -323,17 +325,17 @@ func loadPESections(uc unicorn.Unicorn, sections []*pe.Section, imageBase uint64
 	}
 
 	for _, section := range sections {
-		perms, ok := permsByName[section.Name]
+		perms, ok := permsBySection[section.Name]
 		if !ok {
 			fmt.Printf("[pe] Skipping section %-8s\n", section.Name)
 			continue // skip sections we dont care about
 		}
 
 		alignedSize := (uint64(section.VirtualSize) + 0xFFF) & ^uint64(0xFFF)
-		mapAddr := imageBase + uint64(section.VirtualAddress)
+		mapMemAddr := imageBase + uint64(section.VirtualAddress)
 
-		if err := uc.MemMapProt(mapAddr, alignedSize, perms); err != nil {
-			return fmt.Errorf("failed to map section %s at 0x%x: %w", section.Name, mapAddr, err)
+		if err := uc.MemMapProt(mapMemAddr, alignedSize, perms); err != nil {
+			return fmt.Errorf("failed to map section %s at 0x%x: %w", section.Name, mapMemAddr, err)
 		}
 
 		data, err := section.Data()
@@ -341,14 +343,56 @@ func loadPESections(uc unicorn.Unicorn, sections []*pe.Section, imageBase uint64
 			return fmt.Errorf("failed to read section %s data: %w", section.Name, err)
 		}
 
-		if err := uc.MemWrite(mapAddr, data); err != nil {
+		if err := uc.MemWrite(mapMemAddr, data); err != nil {
 			return fmt.Errorf("failed to write section %s to memory: %w", section.Name, err)
 		}
 
-		fmt.Printf("[pe] Loaded %-8s addr=0x%x size=0x%x (aligned=0x%x) perms=0x%x\n", section.Name, mapAddr, section.VirtualSize, alignedSize, perms)
+		fmt.Printf("[pe] Loaded %-8s addr=0x%x size=0x%x (aligned=0x%x) perms=0x%x\n", section.Name, mapMemAddr, section.VirtualSize, alignedSize, perms)
 	}
 
 	return nil
 }
 
-func patchIAT(uc unicorn.Unicorn, f *pe.File, imageBase uint64, importTable ImportTable) error {}
+func patchIAT(uc unicorn.Unicorn, sections []*pe.Section, imageBase uint64, importTable ImportTable) error {
+	// find the idata section
+	var s *pe.Section
+
+	for _, section := range sections {
+		if section.Name == ".idata" {
+			s = section
+		}
+	}
+
+	idata, err := s.Data()
+	if err != nil {
+		return fmt.Errorf("failed to read section %s data: %w", s.Name, err)
+	}
+
+	type importDescriptor struct {
+		OriginalFirstThunk uint32
+		TimeDataStamp      uint32
+		ForwarderChain     uint32
+		Name               uint32
+		FirstThunk         uint32
+	}
+
+	b := bytes.NewReader(idata)
+
+	for {
+		var desc importDescriptor
+
+		if err := binary.Read(b, binary.LittleEndian, &desc); err != nil {
+			if err == io.EOF {
+				break
+			}
+
+			return fmt.Errorf("failed to read import descriptor: %w", err)
+		}
+
+		if desc.OriginalFirstThunk == 0 && desc.FirstThunk == 0 {
+			break
+		}
+
+	}
+
+}
