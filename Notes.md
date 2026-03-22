@@ -128,3 +128,14 @@ go(uint64(section.VirtualSize) + 0xFFF) & ^uint64(0xFFF)
 Step 1 is adding 0xFFF. This bumps the value up so that anything not already page aligned crosses into the next page boundary. So 0x1500 plus 0xFFF gives you 0x249FF.
 
 Step 2 is the AND with the NOT of 0xFFF. The NOT of 0xFFF flips all the bits, which zeroes out the bottom 12 bits when you AND with it. This rounds the value down to the nearest page boundary. So 0x249FF becomes 0x24000.
+
+**IMAGE_IMPORT_DESCRIPTOR**
+
+```
+Offset  Size  Field
+0x00    4     OriginalFirstThunk  — RVA to INT (Import Name Table)
+0x04    4     TimeDateStamp
+0x08    4     ForwarderChain
+0x0C    4     Name               — RVA to DLL name string
+0x10    4     FirstThunk         — RVA to IAT (Import Address Table)
+```
