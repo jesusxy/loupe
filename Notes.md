@@ -139,3 +139,16 @@ Offset  Size  Field
 0x0C    4     Name               — RVA to DLL name string
 0x10    4     FirstThunk         — RVA to IAT (Import Address Table)
 ```
+
+---
+
+### Reading bytes
+
+Every time you hit this decision, ask yourself: `where does the data live?` \
+`File bytes` → binary.Read. \
+`Emulated memory` → uc.MemRead. \
+Raw `byte slice you already have` → slice indexing or binary.LittleEndian.UintX.
+
+- binary.Read — use when you're reading from a bytes.Reader or io.Reader and deserializing directly into a struct or typed value
+- uc.MemRead — use when you're reading raw bytes from emulated memory. It returns []byte directly, no reader needed
+- io.ReadFull — use when you have a reader and need to guarantee all N bytes are read, no short reads
