@@ -27,6 +27,11 @@ type ImportTable struct {
 	ByName    map[string]uint64
 }
 
+type HintNameTable struct {
+	Hint uint8
+	Name string
+}
+
 func main() {
 	fmt.Println("Initializing the emulator...")
 
@@ -375,20 +380,49 @@ func patchIAT(uc unicorn.Unicorn, f *pe.File, imageBase uint64, importTable Impo
 			return fmt.Errorf("failed to read import dll: %w", err)
 		}
 
-		binary.Read(bytes.NewReader(dllBytes), binary.LittleEndian, &dll)
+		err = binary.Read(bytes.NewReader(dllBytes), binary.LittleEndian, &dll)
+		if err != nil {
+			return fmt.Errorf("failed to read bytes into DLL structure: %w", err)
+		}
 
 		if dll.OriginalFirstThunk == 0 && dll.FirstThunk == 0 {
 			break
 		}
 
-		nameBuf, _ := uc.MemRead(imageBase+uint64(dll.Name), 64)
-		if nullIdx := bytes.IndexByte(nameBuf, 0); nullIdx != -1 {
-			fmt.Printf("DLL Name: %s", string(nameBuf[:nullIdx]))
+		nameBuf, err := uc.MemRead(imageBase+uint64(dll.Name), 64)
+		if err != nil {
+			return fmt.Errorf("[DLL] failed to read dll name %d: %w", dll.Name, err)
 		}
 
+		if nullIdx := bytes.IndexByte(nameBuf, 0); nullIdx != -1 {
+			fmt.Printf("[DLL] Name: %s", string(nameBuf[:nullIdx]))
+		}
+
+		intBase := imageBase + uint64(dll.OriginalFirstThunk)
+		iatBase := imageBase + uint64(dll.FirstThunk)
+
 		// inner loop goes here
-		for {
-			break
+		for i := 0; ; i++ {
+			hnTable, _ := uc.MemRead(intBase+(uint64(i)*8), 8)
+			if binary.LittleEndian.Uint64(hnTable) == 0 {
+				break
+			}
+
+			fnNameBuf, _ := uc.MemRead(binary.LittleEndian.Uint64(hnTable)+2, 64)
+
+			if nullIdx := bytes.IndexByte(fnNameBuf, 0); nullIdx != -1 {
+				fmt.Printf("[DLL] Function Name: %s", string(fnNameBuf[:nullIdx]))
+				fnName := string(fnNameBuf[:nullIdx])
+
+				if addr, ok := importTable.ByName[fnName]; ok {
+					b := make([]byte, 8)
+					binary.LittleEndian.PutUint64(b, addr)
+					err := uc.MemWrite(iatBase+(uint64(i)*8), b)
+					if err != nil {
+						return fmt.Errorf("failed to write IAT entry for %s: %w", fnName, err)
+					}
+				}
+			}
 		}
 
 		importsAddr += 20
