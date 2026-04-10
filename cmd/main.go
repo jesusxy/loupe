@@ -5,7 +5,6 @@ import (
 	"debug/pe"
 	"encoding/binary"
 	"fmt"
-	"io"
 	"log"
 
 	"github.com/unicorn-engine/unicorn/bindings/go/unicorn"
@@ -353,46 +352,48 @@ func loadPESections(uc unicorn.Unicorn, sections []*pe.Section, imageBase uint64
 	return nil
 }
 
-func patchIAT(uc unicorn.Unicorn, sections []*pe.Section, imageBase uint64, importTable ImportTable) error {
-	// find the idata section
-	var s *pe.Section
-
-	for _, section := range sections {
-		if section.Name == ".idata" {
-			s = section
-		}
+func patchIAT(uc unicorn.Unicorn, f *pe.File, imageBase uint64, importTable ImportTable) error {
+	oh, ok := f.OptionalHeader.(*pe.OptionalHeader64)
+	if !ok {
+		return fmt.Errorf("not a 64-bit PE")
 	}
 
-	idata, err := s.Data()
-	if err != nil {
-		return fmt.Errorf("failed to read section %s data: %w", s.Name, err)
-	}
-
-	type importDescriptor struct {
-		OriginalFirstThunk uint32
+	var dll struct {
+		OriginalFirstThunk uint32 // ptr to the INT
 		TimeDataStamp      uint32
 		ForwarderChain     uint32
 		Name               uint32
-		FirstThunk         uint32
+		FirstThunk         uint32 // ptr to IAT
 	}
 
-	b := bytes.NewReader(idata)
+	importDirectory := oh.DataDirectory[pe.IMAGE_DIRECTORY_ENTRY_IMPORT]
+	importsAddr := uint64(importDirectory.VirtualAddress) + imageBase // this is the rva where all the imports are in the PE file
 
 	for {
-		var desc importDescriptor
-
-		if err := binary.Read(b, binary.LittleEndian, &desc); err != nil {
-			if err == io.EOF {
-				break
-			}
-
-			return fmt.Errorf("failed to read import descriptor: %w", err)
+		dllBytes, err := uc.MemRead(uint64(importsAddr), 20)
+		if err != nil {
+			return fmt.Errorf("failed to read import dll: %w", err)
 		}
 
-		if desc.OriginalFirstThunk == 0 && desc.FirstThunk == 0 {
+		binary.Read(bytes.NewReader(dllBytes), binary.LittleEndian, &dll)
+
+		if dll.OriginalFirstThunk == 0 && dll.FirstThunk == 0 {
 			break
 		}
 
+		nameBuf, _ := uc.MemRead(imageBase+uint64(dll.Name), 64)
+		if nullIdx := bytes.IndexByte(nameBuf, 0); nullIdx != -1 {
+			fmt.Printf("DLL Name: %s", string(nameBuf[:nullIdx]))
+		}
+
+		// inner loop goes here
+		for {
+			break
+		}
+
+		importsAddr += 20
+
 	}
 
+	return nil
 }
