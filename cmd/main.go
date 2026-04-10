@@ -73,6 +73,10 @@ func main() {
 	importRegion := regions[3]
 
 	importTable := buildImportTable(uc, importRegion.Base)
+	err = patchIAT(uc, f, 0x400000, importTable)
+	if err != nil {
+		log.Fatalf("Failed to patchIAT: %v", err)
+	}
 
 	for addr, api := range importTable.ByAddress {
 		fmt.Printf("[import] addr=0x%x api=%s\n", addr, api)
