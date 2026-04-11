@@ -10,6 +10,10 @@ import (
 	"github.com/unicorn-engine/unicorn/bindings/go/unicorn"
 )
 
+const (
+	IMAGE_BASE = 0x400000
+)
+
 type MemRegion struct {
 	Base  uint64
 	Size  uint64
@@ -54,7 +58,7 @@ func main() {
 	}
 	defer f.Close()
 
-	err = loadPESections(uc, f.Sections, 0x400000)
+	err = loadPESections(uc, f.Sections, IMAGE_BASE)
 	if err != nil {
 		log.Fatalf("Failed to load PE Sections: %v", err)
 	}
@@ -63,7 +67,7 @@ func main() {
 	importRegion := regions[3]
 
 	importTable := buildImportTable(uc, importRegion.Base)
-	err = patchIAT(uc, f, 0x400000, importTable)
+	err = patchIAT(uc, f, IMAGE_BASE, importTable)
 	if err != nil {
 		log.Fatalf("Failed to patchIAT: %v", err)
 	}
@@ -137,8 +141,8 @@ func executeCode(uc unicorn.Unicorn, oh *pe.OptionalHeader64, stack MemRegion) e
 	if err := uc.RegWrite(unicorn.X86_REG_RSP, stack.Base+stack.Size); err != nil {
 		return fmt.Errorf("failed to set RSP: %w", err)
 	}
-	entrypoint := uint64(oh.AddressOfEntryPoint) + oh.ImageBase
-	end := uint64(oh.SizeOfImage) + oh.ImageBase
+	entrypoint := uint64(oh.AddressOfEntryPoint) + IMAGE_BASE
+	end := uint64(oh.SizeOfImage) + IMAGE_BASE
 	if err := uc.Start(entrypoint, end); err != nil {
 		return err
 	}
@@ -218,7 +222,7 @@ func addMemHook(uc unicorn.Unicorn) error {
 }
 
 func addInvalidMemHook(uc unicorn.Unicorn) error {
-	_, err := uc.HookAdd(unicorn.HOOK_MEM_UNMAPPED, func(uc unicorn.Unicorn, access int, addr uint64, size int, value int64) {
+	_, err := uc.HookAdd(unicorn.HOOK_MEM_UNMAPPED, func(uc unicorn.Unicorn, access int, addr uint64, size int, value int64) bool {
 		accessType := "unknown"
 		switch access {
 		case unicorn.MEM_READ_UNMAPPED:
@@ -233,6 +237,8 @@ func addInvalidMemHook(uc unicorn.Unicorn) error {
 		rip, _ := uc.RegRead(unicorn.X86_REG_RIP)
 		fmt.Printf("[mem invalid] type=%s addr=0x%x size=%d\n", accessType, addr, size)
 		fmt.Printf("[registers] RAX=0x%x RSP=0x%x RIP=0x%x", rax, rsp, rip)
+
+		return false
 	}, 1, 0)
 
 	return err
