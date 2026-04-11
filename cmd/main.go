@@ -395,11 +395,11 @@ func patchIAT(uc unicorn.Unicorn, f *pe.File, imageBase uint64, importTable Impo
 
 		nameBuf, err := uc.MemRead(imageBase+uint64(dll.Name), 64)
 		if err != nil {
-			return fmt.Errorf("[DLL] failed to read dll name %d: %w", dll.Name, err)
+			return fmt.Errorf("[pe:dll] failed to read dll name %d: %w\n", dll.Name, err)
 		}
 
 		if nullIdx := bytes.IndexByte(nameBuf, 0); nullIdx != -1 {
-			fmt.Printf("[DLL] Name: %s", string(nameBuf[:nullIdx]))
+			fmt.Printf("[pe:dll] %s\n", string(nameBuf[:nullIdx]))
 		}
 
 		intBase := imageBase + uint64(dll.OriginalFirstThunk)
@@ -412,10 +412,10 @@ func patchIAT(uc unicorn.Unicorn, f *pe.File, imageBase uint64, importTable Impo
 				break
 			}
 
-			fnNameBuf, _ := uc.MemRead(binary.LittleEndian.Uint64(hnTable)+2, 64)
+			fnNameBuf, _ := uc.MemRead(imageBase+binary.LittleEndian.Uint64(hnTable)+2, 64)
 
 			if nullIdx := bytes.IndexByte(fnNameBuf, 0); nullIdx != -1 {
-				fmt.Printf("[DLL] Function Name: %s", string(fnNameBuf[:nullIdx]))
+				fmt.Printf("[pe:dll:fn] %s\n", string(fnNameBuf[:nullIdx]))
 				fnName := string(fnNameBuf[:nullIdx])
 
 				if addr, ok := importTable.ByName[fnName]; ok {
@@ -423,8 +423,9 @@ func patchIAT(uc unicorn.Unicorn, f *pe.File, imageBase uint64, importTable Impo
 					binary.LittleEndian.PutUint64(b, addr)
 					err := uc.MemWrite(iatBase+(uint64(i)*8), b)
 					if err != nil {
-						return fmt.Errorf("failed to write IAT entry for %s: %w", fnName, err)
+						return fmt.Errorf("failed to write IAT entry for %s: %w\n", fnName, err)
 					}
+					fmt.Printf("[iatpatch] %s=0x%x\n", fnName, addr)
 				}
 			}
 		}
