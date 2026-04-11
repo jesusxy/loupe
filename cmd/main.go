@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"log"
+	"os"
 
 	"github.com/unicorn-engine/unicorn/bindings/go/unicorn"
 )
@@ -52,13 +53,13 @@ func main() {
 		fmt.Printf("[%s] base=0x%x size=0x%x perms=%d\n", r.Label, r.Base, r.Size, r.Perms)
 	}
 
-	f, err := parsePE("testdata/test.exe")
+	f, raw, err := parsePE("testdata/test.exe")
 	if err != nil {
 		log.Fatalf("Failed to parse PE file: %v", err)
 	}
-	defer f.Close()
+	defer raw.Close()
 
-	err = loadPESections(uc, f.Sections, IMAGE_BASE)
+	err = loadPESections(uc, raw, f.Sections)
 	if err != nil {
 		log.Fatalf("Failed to load PE Sections: %v", err)
 	}
@@ -71,7 +72,7 @@ func main() {
 		fmt.Printf("[import] addr=0x%x api=%s\n", addr, api)
 	}
 
-	err = patchIAT(uc, f, IMAGE_BASE, importTable)
+	err = patchIAT(uc, f, importTable)
 	if err != nil {
 		log.Fatalf("Failed to patchIAT: %v", err)
 	}
@@ -287,16 +288,23 @@ func addAPIHook(uc unicorn.Unicorn, importTable ImportTable, importRegion MemReg
 }
 
 // ------------- PE File ---------------- //
-func parsePE(path string) (*pe.File, error) {
-	f, err := pe.Open(path)
+func parsePE(path string) (*pe.File, *os.File, error) {
+	raw, err := os.Open(path)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open PE file: %w\n", err)
+		return nil, nil, fmt.Errorf("failed to open PE file: %w", err)
+	}
+
+	f, err := pe.NewFile(raw)
+	if err != nil {
+		raw.Close()
+		return nil, nil, fmt.Errorf("failed to parse PE file: %w\n", err)
 	}
 
 	fmt.Printf("[pe] Number of Sections in file %d\n", f.FileHeader.NumberOfSections)
 	oh, ok := f.OptionalHeader.(*pe.OptionalHeader64)
 	if !ok {
-		return nil, fmt.Errorf("not a 64-bit PE")
+		raw.Close()
+		return nil, nil, fmt.Errorf("not a 64-bit PE")
 	}
 
 	fmt.Printf("[pe] Image Base: 0x%x\n", oh.ImageBase)
@@ -306,10 +314,15 @@ func parsePE(path string) (*pe.File, error) {
 		fmt.Printf("[pe] Section name:%-8s - va:0x%x\n", section.Name, section.VirtualAddress)
 	}
 
-	return f, nil
+	return f, raw, nil
 }
 
-func loadPESections(uc unicorn.Unicorn, sections []*pe.Section, imageBase uint64) error {
+func loadPESections(uc unicorn.Unicorn, raw *os.File, sections []*pe.Section) error {
+	headerBuf := make([]byte, 0x1000)
+	if _, err := raw.ReadAt(headerBuf, 0); err != nil {
+		return fmt.Errorf("failed to read PE headers: %w", err)
+	}
+
 	permsBySection := map[string]int{
 		".text":  unicorn.PROT_READ | unicorn.PROT_EXEC,
 		".data":  unicorn.PROT_READ | unicorn.PROT_WRITE,
@@ -326,7 +339,7 @@ func loadPESections(uc unicorn.Unicorn, sections []*pe.Section, imageBase uint64
 		}
 
 		alignedSize := (uint64(section.VirtualSize) + 0xFFF) & ^uint64(0xFFF)
-		mapMemAddr := imageBase + uint64(section.VirtualAddress)
+		mapMemAddr := IMAGE_BASE + uint64(section.VirtualAddress)
 
 		if err := uc.MemMapProt(mapMemAddr, alignedSize, perms); err != nil {
 			return fmt.Errorf("failed to map section %s at 0x%x: %w", section.Name, mapMemAddr, err)
@@ -347,7 +360,7 @@ func loadPESections(uc unicorn.Unicorn, sections []*pe.Section, imageBase uint64
 	return nil
 }
 
-func patchIAT(uc unicorn.Unicorn, f *pe.File, imageBase uint64, importTable ImportTable) error {
+func patchIAT(uc unicorn.Unicorn, f *pe.File, importTable ImportTable) error {
 	oh, ok := f.OptionalHeader.(*pe.OptionalHeader64)
 	if !ok {
 		return fmt.Errorf("not a 64-bit PE")
@@ -362,7 +375,7 @@ func patchIAT(uc unicorn.Unicorn, f *pe.File, imageBase uint64, importTable Impo
 	}
 
 	importDirectory := oh.DataDirectory[pe.IMAGE_DIRECTORY_ENTRY_IMPORT]
-	importsAddr := uint64(importDirectory.VirtualAddress) + imageBase // this is the rva where all the imports are in the PE file
+	importsAddr := uint64(importDirectory.VirtualAddress) + IMAGE_BASE // this is the rva where all the imports are in the PE file
 
 	for {
 		dllBytes, err := uc.MemRead(uint64(importsAddr), 20)
@@ -379,7 +392,7 @@ func patchIAT(uc unicorn.Unicorn, f *pe.File, imageBase uint64, importTable Impo
 			break
 		}
 
-		nameBuf, err := uc.MemRead(imageBase+uint64(dll.Name), 64)
+		nameBuf, err := uc.MemRead(IMAGE_BASE+uint64(dll.Name), 64)
 		if err != nil {
 			return fmt.Errorf("[pe:dll] failed to read dll name %d: %w\n", dll.Name, err)
 		}
@@ -388,8 +401,8 @@ func patchIAT(uc unicorn.Unicorn, f *pe.File, imageBase uint64, importTable Impo
 			fmt.Printf("[pe:dll] %s\n", string(nameBuf[:nullIdx]))
 		}
 
-		intBase := imageBase + uint64(dll.OriginalFirstThunk)
-		iatBase := imageBase + uint64(dll.FirstThunk)
+		intBase := IMAGE_BASE + uint64(dll.OriginalFirstThunk)
+		iatBase := IMAGE_BASE + uint64(dll.FirstThunk)
 
 		// inner loop goes here
 		for i := 0; ; i++ {
@@ -398,7 +411,7 @@ func patchIAT(uc unicorn.Unicorn, f *pe.File, imageBase uint64, importTable Impo
 				break
 			}
 
-			fnNameBuf, _ := uc.MemRead(imageBase+binary.LittleEndian.Uint64(hnTable)+2, 64)
+			fnNameBuf, _ := uc.MemRead(IMAGE_BASE+binary.LittleEndian.Uint64(hnTable)+2, 64)
 
 			if nullIdx := bytes.IndexByte(fnNameBuf, 0); nullIdx != -1 {
 				fmt.Printf("[pe:dll:fn] %s\n", string(fnNameBuf[:nullIdx]))
