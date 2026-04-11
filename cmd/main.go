@@ -67,13 +67,18 @@ func main() {
 	importRegion := regions[3]
 
 	importTable := buildImportTable(uc, importRegion.Base)
+	for addr, api := range importTable.ByAddress {
+		fmt.Printf("[import] addr=0x%x api=%s\n", addr, api)
+	}
+
 	err = patchIAT(uc, f, IMAGE_BASE, importTable)
 	if err != nil {
 		log.Fatalf("Failed to patchIAT: %v", err)
 	}
 
-	for addr, api := range importTable.ByAddress {
-		fmt.Printf("[import] addr=0x%x api=%s\n", addr, api)
+	err = setupTEB(uc)
+	if err != nil {
+		log.Fatalf("Failed to setup TEB: %v", err)
 	}
 
 	oh := f.OptionalHeader.(*pe.OptionalHeader64)
@@ -413,6 +418,56 @@ func patchIAT(uc unicorn.Unicorn, f *pe.File, imageBase uint64, importTable Impo
 
 		importsAddr += 20
 
+	}
+
+	return nil
+}
+
+func setupTEB(uc unicorn.Unicorn) error {
+	memRegions := []MemRegion{
+		{Base: 0x5000000, Size: 0x10000, Perms: unicorn.PROT_READ | unicorn.PROT_WRITE, Label: "teb"},
+		{Base: 0x6000000, Size: 0x10000, Perms: unicorn.PROT_READ | unicorn.PROT_WRITE, Label: "peb"},
+	}
+
+	for _, r := range memRegions {
+		if err := uc.MemMapProt(r.Base, r.Size, int(r.Perms)); err != nil {
+			return fmt.Errorf("failed to map %s region: %w", r.Label, err)
+		}
+	}
+
+	teb := memRegions[0]
+	peb := memRegions[1]
+
+	buf := make([]byte, 8)
+	binary.LittleEndian.PutUint64(buf, peb.Base)
+
+	err := uc.MemWrite(teb.Base+0x30, buf)
+	if err != nil {
+		return fmt.Errorf("failed to write peb addr into teb: %w", err)
+	}
+
+	binary.LittleEndian.PutUint64(buf, IMAGE_BASE)
+	err = uc.MemWrite(peb.Base+0x10, buf)
+	if err != nil {
+		return fmt.Errorf("failed to write image base into peb: %w", err)
+	}
+
+	osVersionBuf := make([]byte, 4)
+	binary.LittleEndian.PutUint32(osVersionBuf, 0x0A)
+	err = uc.MemWrite(peb.Base+0xBC, osVersionBuf)
+	if err != nil {
+		return fmt.Errorf("failed to write Windows version into peb: %w", err)
+	}
+
+	binary.LittleEndian.PutUint64(buf, 0x3000000)
+	err = uc.MemWrite(peb.Base+0x30, buf)
+	if err != nil {
+		return fmt.Errorf("failed to write fake heap into peb: %w", err)
+	}
+
+	err = uc.RegWrite(unicorn.X86_REG_GS_BASE, teb.Base)
+	if err != nil {
+		return fmt.Errorf("failed to point GS base at teb: %w", err)
 	}
 
 	return nil
