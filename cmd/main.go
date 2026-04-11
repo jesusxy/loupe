@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	IMAGE_BASE = 0x400000
+	IMAGE_BASE = 0x140000000
 )
 
 type MemRegion struct {
@@ -236,7 +236,7 @@ func addInvalidMemHook(uc unicorn.Unicorn) error {
 		rsp, _ := uc.RegRead(unicorn.X86_REG_RSP)
 		rip, _ := uc.RegRead(unicorn.X86_REG_RIP)
 		fmt.Printf("[mem invalid] type=%s addr=0x%x size=%d\n", accessType, addr, size)
-		fmt.Printf("[registers] RAX=0x%x RSP=0x%x RIP=0x%x", rax, rsp, rip)
+		fmt.Printf("[registers] RAX=0x%x RSP=0x%x RIP=0x%x\n", rax, rsp, rip)
 
 		return false
 	}, 1, 0)
@@ -310,6 +310,7 @@ func loadPESections(uc unicorn.Unicorn, sections []*pe.Section, imageBase uint64
 		".data":  unicorn.PROT_READ | unicorn.PROT_WRITE,
 		".rdata": unicorn.PROT_READ,
 		".idata": unicorn.PROT_READ | unicorn.PROT_WRITE,
+		".bss":   unicorn.PROT_READ | unicorn.PROT_WRITE,
 	}
 
 	for _, section := range sections {
