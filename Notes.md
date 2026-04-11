@@ -152,3 +152,15 @@ Raw `byte slice you already have` → slice indexing or binary.LittleEndian.Uint
 - binary.Read — use when you're reading from a bytes.Reader or io.Reader and deserializing directly into a struct or typed value
 - uc.MemRead — use when you're reading raw bytes from emulated memory. It returns []byte directly, no reader needed
 - io.ReadFull — use when you have a reader and need to guarantee all N bytes are read, no short reads
+
+---
+
+Good question. Neither — it's a virtual address.
+When Windows loads a PE, it maps it into the process's virtual address space. The ImageBase in the optional header is where the linker preferred to place it in virtual memory. For 64-bit Windows executables the default preferred base is 0x140000000.
+So the timeline is:
+
+On disk — the file has no meaningful base, just RVAs (relative offsets)
+In virtual memory (real Windows) — the loader maps it at 0x140000000 if possible, applies relocations if not
+In your emulator — you're the loader, and you chose 0x400000 as your virtual address space base instead
+
+So oh.ImageBase is the preferred virtual address on a real Windows system. IMAGE_BASE is the virtual address in your emulated address space. Same concept, different value.
