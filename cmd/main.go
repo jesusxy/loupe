@@ -200,8 +200,8 @@ func buildImportTable(uc unicorn.Unicorn, base uint64) ImportTable {
 // ------------ HOOKS ----------------- //
 
 func addInstrHook(uc unicorn.Unicorn, oh *pe.OptionalHeader64) error {
-	entryPoint := uint64(oh.AddressOfEntryPoint) + oh.ImageBase
-	imageEnd := uint64(oh.SizeOfImage) + oh.ImageBase
+	entryPoint := uint64(oh.AddressOfEntryPoint) + IMAGE_BASE
+	imageEnd := uint64(oh.SizeOfImage) + IMAGE_BASE
 	_, err := uc.HookAdd(unicorn.HOOK_CODE, func(uc unicorn.Unicorn, addr uint64, size uint32) {
 		fmt.Printf("[trace] 0x%x (%d bytes)\n", addr, size)
 	}, entryPoint, imageEnd)
