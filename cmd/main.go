@@ -64,12 +64,8 @@ func main() {
 		log.Fatalf("Failed to load PE Sections: %v", err)
 	}
 
-	plaintext := []byte{0x41, 0x42, 0x43, 0x44}
-	shellcode := []byte{0x48, 0xC7, 0xC0, 0x00, 0x00, 0x00, 0x04, 0xFF, 0xD0, 0xF4}
-
 	codeRegion := regions[0]
 	stackRegion := regions[1]
-	dataRegion := regions[2]
 	importRegion := regions[3]
 
 	importTable := buildImportTable(uc, importRegion.Base)
@@ -80,11 +76,6 @@ func main() {
 
 	for addr, api := range importTable.ByAddress {
 		fmt.Printf("[import] addr=0x%x api=%s\n", addr, api)
-	}
-
-	encrypted := xorEncrypt(plaintext, 0xAA)
-	if err = uc.MemWrite(dataRegion.Base, encrypted); err != nil {
-		log.Fatalf("Failed to write encrypted payload: %v", err)
 	}
 
 	err = addInstrHook(uc, codeRegion)
@@ -107,26 +98,11 @@ func main() {
 		log.Fatalf("Failed to add API Hook: %v", err)
 	}
 
-	err = loadCode(uc, codeRegion, shellcode)
-	if err != nil {
-		log.Fatalf("Failed to load code into memory: %v", err)
-	}
-
-	err = executeCode(uc, codeRegion, stackRegion, len(shellcode))
+	oh := f.OptionalHeader.(*pe.OptionalHeader64)
+	err = executeCode(uc, oh, stackRegion)
 	if err != nil {
 		log.Fatalf("Failed to execute code: %v", err)
 	}
-
-	data, err := dumpMemory(uc, dataRegion.Base, uint64(len(plaintext)))
-	if err != nil {
-		log.Fatalf("Failed to decrypt payload from data region: %v", err)
-	}
-
-	// print data
-	fmt.Printf("encrypted input: 	%x\n", encrypted)
-	fmt.Printf("dumped output: 		%x\n", data)
-	fmt.Printf("as string:			%s\n", data)
-
 }
 
 func setupMem(uc unicorn.Unicorn) ([]MemRegion, error) {
@@ -162,12 +138,13 @@ func loadCode(uc unicorn.Unicorn, codeRegion MemRegion, shellcode []byte) error 
 	return nil
 }
 
-func executeCode(uc unicorn.Unicorn, code MemRegion, stack MemRegion, shellcodeLen int) error {
+func executeCode(uc unicorn.Unicorn, oh *pe.OptionalHeader64, stack MemRegion) error {
 	if err := uc.RegWrite(unicorn.X86_REG_RSP, stack.Base+stack.Size); err != nil {
 		return fmt.Errorf("failed to set RSP: %w", err)
 	}
-
-	if err := uc.Start(code.Base, code.Base+uint64(shellcodeLen)); err != nil {
+	entrypoint := uint64(oh.AddressOfEntryPoint) + oh.ImageBase
+	end := uint64(oh.SizeOfImage) + oh.ImageBase
+	if err := uc.Start(entrypoint, end); err != nil {
 		return err
 	}
 
