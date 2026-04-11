@@ -27,11 +27,6 @@ type ImportTable struct {
 	ByName    map[string]uint64
 }
 
-type HintNameTable struct {
-	Hint uint8
-	Name string
-}
-
 func main() {
 	fmt.Println("Initializing the emulator...")
 
@@ -64,7 +59,6 @@ func main() {
 		log.Fatalf("Failed to load PE Sections: %v", err)
 	}
 
-	codeRegion := regions[0]
 	stackRegion := regions[1]
 	importRegion := regions[3]
 
@@ -78,7 +72,9 @@ func main() {
 		fmt.Printf("[import] addr=0x%x api=%s\n", addr, api)
 	}
 
-	err = addInstrHook(uc, codeRegion)
+	oh := f.OptionalHeader.(*pe.OptionalHeader64)
+
+	err = addInstrHook(uc, oh)
 	if err != nil {
 		log.Fatalf("Failed to add Instruction Hook: %v", err)
 	}
@@ -98,7 +94,6 @@ func main() {
 		log.Fatalf("Failed to add API Hook: %v", err)
 	}
 
-	oh := f.OptionalHeader.(*pe.OptionalHeader64)
 	err = executeCode(uc, oh, stackRegion)
 	if err != nil {
 		log.Fatalf("Failed to execute code: %v", err)
@@ -200,10 +195,12 @@ func buildImportTable(uc unicorn.Unicorn, base uint64) ImportTable {
 
 // ------------ HOOKS ----------------- //
 
-func addInstrHook(uc unicorn.Unicorn, codeRegion MemRegion) error {
+func addInstrHook(uc unicorn.Unicorn, oh *pe.OptionalHeader64) error {
+	entryPoint := uint64(oh.AddressOfEntryPoint) + oh.ImageBase
+	imageEnd := uint64(oh.SizeOfImage) + oh.ImageBase
 	_, err := uc.HookAdd(unicorn.HOOK_CODE, func(uc unicorn.Unicorn, addr uint64, size uint32) {
 		fmt.Printf("[trace] 0x%x (%d bytes)\n", addr, size)
-	}, codeRegion.Base, codeRegion.Base+codeRegion.Size)
+	}, entryPoint, imageEnd)
 
 	return err
 }
