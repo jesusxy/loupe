@@ -412,6 +412,10 @@ func patchIAT(uc unicorn.Unicorn, f *pe.File) (ImportTable, error) {
 			hnTable, _ := uc.MemRead(intBase+(uint64(i)*8), 8)
 			intEntry := binary.LittleEndian.Uint64(hnTable)
 
+			if intEntry == 0 {
+				break
+			}
+
 			if intEntry&0x8000000000000000 != 0 {
 				// ordinal import - skip for now
 				fmt.Printf("[pe:dll:fn] ordinal=0x%x (skipped)\n", intEntry&0xFFFF)
