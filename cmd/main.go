@@ -410,11 +410,15 @@ func patchIAT(uc unicorn.Unicorn, f *pe.File) (ImportTable, error) {
 		// inner loop goes here
 		for i := 0; ; i++ {
 			hnTable, _ := uc.MemRead(intBase+(uint64(i)*8), 8)
-			if binary.LittleEndian.Uint64(hnTable) == 0 {
-				break
+			intEntry := binary.LittleEndian.Uint64(hnTable)
+
+			if intEntry&0x8000000000000000 != 0 {
+				// ordinal import - skip for now
+				fmt.Printf("[pe:dll:fn] ordinal=0x%x (skipped)\n", intEntry&0xFFFF)
+				continue
 			}
 
-			fnNameBuf, _ := uc.MemRead(IMAGE_BASE+binary.LittleEndian.Uint64(hnTable)+2, 64)
+			fnNameBuf, _ := uc.MemRead(IMAGE_BASE+intEntry+2, 64)
 
 			if nullIdx := bytes.IndexByte(fnNameBuf, 0); nullIdx != -1 {
 				fmt.Printf("[pe:dll:fn] %s\n", string(fnNameBuf[:nullIdx]))
