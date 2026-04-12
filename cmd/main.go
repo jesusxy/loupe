@@ -67,14 +67,13 @@ func main() {
 	stackRegion := regions[1]
 	importRegion := regions[3]
 
-	importTable := buildImportTable(uc, importRegion.Base)
-	for addr, api := range importTable.ByAddress {
-		fmt.Printf("[import] addr=0x%x api=%s\n", addr, api)
-	}
-
-	err = patchIAT(uc, f, importTable)
+	importTable, err := patchIAT(uc, f)
 	if err != nil {
 		log.Fatalf("Failed to patchIAT: %v", err)
+	}
+
+	for addr, api := range importTable.ByAddress {
+		fmt.Printf("[import] addr=0x%x api=%s\n", addr, api)
 	}
 
 	err = setupTEB(uc)
@@ -180,27 +179,14 @@ func findRegion(regions []MemRegion, label string) (MemRegion, bool) {
 	return MemRegion{}, false
 }
 
-func buildImportTable(uc unicorn.Unicorn, base uint64) ImportTable {
-	// LoadLibraryW, URLDownloadToFileW ?
-	apiNames := []string{"VirtualAlloc", "VirtualProtect", "LoadLibraryA", "GetProcAddress"}
-	importTable := ImportTable{
-		ByAddress: make(map[uint64]string),
-		ByName:    make(map[string]uint64),
+func makeStubAllocator(base uint64) func() uint64 {
+	next := base
+
+	return func() uint64 {
+		addr := next
+		next += 8
+		return addr
 	}
-
-	for i, api := range apiNames {
-		addr := base + (uint64(i) * 8)
-		err := uc.MemWrite(addr, []byte{0xC3})
-		if err != nil {
-			fmt.Printf("Failed to write RET stub to addr: 0x%x - %v\n", addr, err)
-		}
-
-		importTable.ByAddress[addr] = api
-		importTable.ByName[api] = addr
-
-	}
-
-	return importTable
 }
 
 // ------------ HOOKS ----------------- //
@@ -323,6 +309,16 @@ func loadPESections(uc unicorn.Unicorn, raw *os.File, sections []*pe.Section) er
 		return fmt.Errorf("failed to read PE headers: %w", err)
 	}
 
+	if err := uc.MemMapProt(IMAGE_BASE, 0x1000, unicorn.PROT_READ); err != nil {
+		return fmt.Errorf("failed to mape PE header region: %w", err)
+	}
+
+	if err := uc.MemWrite(IMAGE_BASE, headerBuf); err != nil {
+		return fmt.Errorf("failed to write PE headers to memory: %w", err)
+	}
+
+	fmt.Printf("[pe] Loaded headers addr=0x%x size=0x1000\n", IMAGE_BASE)
+
 	permsBySection := map[string]int{
 		".text":  unicorn.PROT_READ | unicorn.PROT_EXEC,
 		".data":  unicorn.PROT_READ | unicorn.PROT_WRITE,
@@ -360,10 +356,17 @@ func loadPESections(uc unicorn.Unicorn, raw *os.File, sections []*pe.Section) er
 	return nil
 }
 
-func patchIAT(uc unicorn.Unicorn, f *pe.File, importTable ImportTable) error {
+func patchIAT(uc unicorn.Unicorn, f *pe.File) (ImportTable, error) {
+	importTable := ImportTable{
+		ByAddress: make(map[uint64]string),
+		ByName:    make(map[string]uint64),
+	}
+
+	alloc := makeStubAllocator(0x4000000)
+
 	oh, ok := f.OptionalHeader.(*pe.OptionalHeader64)
 	if !ok {
-		return fmt.Errorf("not a 64-bit PE")
+		return ImportTable{}, fmt.Errorf("not a 64-bit PE")
 	}
 
 	var dll struct {
@@ -380,12 +383,12 @@ func patchIAT(uc unicorn.Unicorn, f *pe.File, importTable ImportTable) error {
 	for {
 		dllBytes, err := uc.MemRead(uint64(importsAddr), 20)
 		if err != nil {
-			return fmt.Errorf("failed to read import dll: %w", err)
+			return ImportTable{}, fmt.Errorf("failed to read import dll: %w", err)
 		}
 
 		err = binary.Read(bytes.NewReader(dllBytes), binary.LittleEndian, &dll)
 		if err != nil {
-			return fmt.Errorf("failed to read bytes into DLL structure: %w", err)
+			return ImportTable{}, fmt.Errorf("failed to read bytes into DLL structure: %w", err)
 		}
 
 		if dll.OriginalFirstThunk == 0 && dll.FirstThunk == 0 {
@@ -394,7 +397,7 @@ func patchIAT(uc unicorn.Unicorn, f *pe.File, importTable ImportTable) error {
 
 		nameBuf, err := uc.MemRead(IMAGE_BASE+uint64(dll.Name), 64)
 		if err != nil {
-			return fmt.Errorf("[pe:dll] failed to read dll name %d: %w\n", dll.Name, err)
+			return ImportTable{}, fmt.Errorf("[pe:dll] failed to read dll name %d: %w\n", dll.Name, err)
 		}
 
 		if nullIdx := bytes.IndexByte(nameBuf, 0); nullIdx != -1 {
@@ -417,15 +420,23 @@ func patchIAT(uc unicorn.Unicorn, f *pe.File, importTable ImportTable) error {
 				fmt.Printf("[pe:dll:fn] %s\n", string(fnNameBuf[:nullIdx]))
 				fnName := string(fnNameBuf[:nullIdx])
 
-				if addr, ok := importTable.ByName[fnName]; ok {
-					b := make([]byte, 8)
-					binary.LittleEndian.PutUint64(b, addr)
-					err := uc.MemWrite(iatBase+(uint64(i)*8), b)
-					if err != nil {
-						return fmt.Errorf("failed to write IAT entry for %s: %w\n", fnName, err)
-					}
-					fmt.Printf("[iatpatch] %s=0x%x\n", fnName, addr)
+				stubAddr := alloc()
+
+				err := uc.MemWrite(stubAddr, []byte{0xC3})
+				if err != nil {
+					return ImportTable{}, fmt.Errorf("failed to write RET to stub addr 0x%x : %w", stubAddr, err)
 				}
+
+				importTable.ByName[fnName] = stubAddr
+				importTable.ByAddress[stubAddr] = fnName
+
+				b := make([]byte, 8)
+				binary.LittleEndian.PutUint64(b, stubAddr)
+				if err := uc.MemWrite(iatBase+(uint64(i)*8), b); err != nil {
+					return ImportTable{}, fmt.Errorf("failed to write to IAT entry for %s: %w", fnName, err)
+				}
+
+				fmt.Printf("[iatpatch] %s=0x%x\n", fnName, stubAddr)
 			}
 		}
 
@@ -433,7 +444,7 @@ func patchIAT(uc unicorn.Unicorn, f *pe.File, importTable ImportTable) error {
 
 	}
 
-	return nil
+	return importTable, nil
 }
 
 func setupTEB(uc unicorn.Unicorn) error {
