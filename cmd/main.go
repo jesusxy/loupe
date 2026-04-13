@@ -81,9 +81,7 @@ func main() {
 		log.Fatalf("Failed to setup TEB: %v", err)
 	}
 
-	oh := f.OptionalHeader.(*pe.OptionalHeader64)
-
-	err = addInstrHook(uc, oh)
+	err = addInstrHook(uc)
 	if err != nil {
 		log.Fatalf("Failed to add Instruction Hook: %v", err)
 	}
@@ -103,6 +101,7 @@ func main() {
 		log.Fatalf("Failed to add API Hook: %v", err)
 	}
 
+	oh := f.OptionalHeader.(*pe.OptionalHeader64)
 	err = executeCode(uc, oh, stackRegion)
 	if err != nil {
 		log.Fatalf("Failed to execute code: %v", err)
@@ -115,13 +114,25 @@ func setupMem(uc unicorn.Unicorn) ([]MemRegion, error) {
 		{Base: 0x2000000, Size: 0x100000, Perms: unicorn.PROT_READ | unicorn.PROT_WRITE, Label: "stack"},
 		{Base: 0x3000000, Size: 0x1000, Perms: unicorn.PROT_READ | unicorn.PROT_WRITE, Label: "data"},
 		{Base: 0x4000000, Size: 0x1000, Perms: unicorn.PROT_READ | unicorn.PROT_EXEC, Label: "imports"},
-		{Base: 0x7000000, Size: 0x1000, Perms: unicorn.PROT_READ | unicorn.PROT_WRITE, Label: "scracth"},
+		{Base: 0x7000000, Size: 0x1000, Perms: unicorn.PROT_READ | unicorn.PROT_WRITE, Label: "scratch"},
 	}
 
 	for _, r := range memRegions {
 		if err := uc.MemMapProt(r.Base, r.Size, int(r.Perms)); err != nil {
 			return nil, fmt.Errorf("failed to map %s region: %w", r.Label, err)
 		}
+	}
+
+	argcData := make([]byte, 4)
+	binary.LittleEndian.PutUint32(argcData, 1)
+	if err := uc.MemWrite(0x7000040, argcData); err != nil {
+		return nil, fmt.Errorf("failed to write argc data: %w", err)
+	}
+
+	argvPtr := make([]byte, 8)
+	binary.LittleEndian.PutUint64(argvPtr, 0x7000060)
+	if err := uc.MemWrite(0x7000050, argvPtr); err != nil {
+		return nil, fmt.Errorf("failed to write argv data: %w", err)
 	}
 
 	fmt.Println("Successfully mapped memory regions")
@@ -144,12 +155,21 @@ func loadCode(uc unicorn.Unicorn, codeRegion MemRegion, shellcode []byte) error 
 }
 
 func executeCode(uc unicorn.Unicorn, oh *pe.OptionalHeader64, stack MemRegion) error {
-	if err := uc.RegWrite(unicorn.X86_REG_RSP, stack.Base+stack.Size); err != nil {
+	const sentinel uint64 = 0xDEAD000000000000
+	rsp := stack.Base + stack.Size - 8 // leave some room for sentinel
+
+	buf := make([]byte, 8)
+	binary.LittleEndian.PutUint64(buf, sentinel)
+
+	if err := uc.MemWrite(rsp, buf); err != nil {
+		return fmt.Errorf("failed to write sentinel return address: %w", err)
+	}
+
+	if err := uc.RegWrite(unicorn.X86_REG_RSP, rsp); err != nil {
 		return fmt.Errorf("failed to set RSP: %w", err)
 	}
 	entrypoint := uint64(oh.AddressOfEntryPoint) + IMAGE_BASE
-	end := uint64(oh.SizeOfImage) + IMAGE_BASE
-	if err := uc.Start(entrypoint, end); err != nil {
+	if err := uc.Start(entrypoint, sentinel); err != nil {
 		return err
 	}
 
@@ -192,12 +212,10 @@ func makeStubAllocator(base uint64) func() uint64 {
 
 // ------------ HOOKS ----------------- //
 
-func addInstrHook(uc unicorn.Unicorn, oh *pe.OptionalHeader64) error {
-	entryPoint := uint64(oh.AddressOfEntryPoint) + IMAGE_BASE
-	imageEnd := uint64(oh.SizeOfImage) + IMAGE_BASE
+func addInstrHook(uc unicorn.Unicorn) error {
 	_, err := uc.HookAdd(unicorn.HOOK_CODE, func(uc unicorn.Unicorn, addr uint64, size uint32) {
 		fmt.Printf("[trace] 0x%x (%d bytes)\n", addr, size)
-	}, entryPoint, imageEnd)
+	}, 0, ^uint64(0))
 
 	return err
 }
@@ -246,6 +264,8 @@ func addAPIHook(uc unicorn.Unicorn, importTable ImportTable, importRegion MemReg
 		"VirtualAlloc":    0x7000020,
 		"malloc":          0x7000028,
 		"calloc":          0x7000030,
+		"__p___argc":      0x7000040,
+		"__p___argv":      0x7000050,
 	}
 
 	_, err := uc.HookAdd(unicorn.HOOK_CODE, func(uc unicorn.Unicorn, addr uint64, size uint32) {
@@ -256,7 +276,7 @@ func addAPIHook(uc unicorn.Unicorn, importTable ImportTable, importRegion MemReg
 
 		retVal, ok := returnVals[api]
 		if !ok {
-			retVal = 0x1
+			retVal = 0x0
 		}
 		// write a fake return val to RAX
 		if err := uc.RegWrite(unicorn.X86_REG_RAX, retVal); err != nil {
@@ -277,6 +297,12 @@ func addAPIHook(uc unicorn.Unicorn, importTable ImportTable, importRegion MemReg
 		}
 
 		fmt.Printf("[api] Intercepted api: %s addr=0x%x ret=0x%x RAX=0x%x\n", api, addr, retAddr, retVal)
+
+		if api == "exit" || api == "abort" || api == "_exit" {
+			fmt.Println("[unicorn] Program called exit. Stopping simulation...")
+			uc.Stop()
+			return
+		}
 
 		err = uc.RegWrite(unicorn.X86_REG_RSP, rsp+8) // increment SP
 		if err != nil {
