@@ -112,7 +112,7 @@ func main() {
 func setupMem(uc unicorn.Unicorn) ([]MemRegion, error) {
 	memRegions := []MemRegion{
 		{Base: 0x1000000, Size: 0x1000, Perms: unicorn.PROT_READ | unicorn.PROT_EXEC, Label: "code"},
-		{Base: 0x2000000, Size: 0x1000, Perms: unicorn.PROT_READ | unicorn.PROT_WRITE, Label: "stack"},
+		{Base: 0x2000000, Size: 0x100000, Perms: unicorn.PROT_READ | unicorn.PROT_WRITE, Label: "stack"},
 		{Base: 0x3000000, Size: 0x1000, Perms: unicorn.PROT_READ | unicorn.PROT_WRITE, Label: "data"},
 		{Base: 0x4000000, Size: 0x1000, Perms: unicorn.PROT_READ | unicorn.PROT_EXEC, Label: "imports"},
 		{Base: 0x7000000, Size: 0x1000, Perms: unicorn.PROT_READ | unicorn.PROT_WRITE, Label: "scracth"},
