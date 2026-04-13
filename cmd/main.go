@@ -115,6 +115,7 @@ func setupMem(uc unicorn.Unicorn) ([]MemRegion, error) {
 		{Base: 0x2000000, Size: 0x1000, Perms: unicorn.PROT_READ | unicorn.PROT_WRITE, Label: "stack"},
 		{Base: 0x3000000, Size: 0x1000, Perms: unicorn.PROT_READ | unicorn.PROT_WRITE, Label: "data"},
 		{Base: 0x4000000, Size: 0x1000, Perms: unicorn.PROT_READ | unicorn.PROT_EXEC, Label: "imports"},
+		{Base: 0x7000000, Size: 0x1000, Perms: unicorn.PROT_READ | unicorn.PROT_WRITE, Label: "scracth"},
 	}
 
 	for _, r := range memRegions {
@@ -237,14 +238,28 @@ func addInvalidMemHook(uc unicorn.Unicorn) error {
 }
 
 func addAPIHook(uc unicorn.Unicorn, importTable ImportTable, importRegion MemRegion) error {
+	returnVals := map[string]uint64{
+		"__p__fmode":      0x7000000,
+		"__p__commode":    0x7000008,
+		"__p__environ":    0x7000010,
+		"__acrt_iob_func": 0x7000018,
+		"VirtualAlloc":    0x7000020,
+		"malloc":          0x7000028,
+		"calloc":          0x7000030,
+	}
+
 	_, err := uc.HookAdd(unicorn.HOOK_CODE, func(uc unicorn.Unicorn, addr uint64, size uint32) {
 		api, ok := importTable.ByAddress[addr]
 		if !ok {
 			return
 		}
 
+		retVal, ok := returnVals[api]
+		if !ok {
+			retVal = 0x1
+		}
 		// write a fake return val to RAX
-		if err := uc.RegWrite(unicorn.X86_REG_RAX, 0x1); err != nil {
+		if err := uc.RegWrite(unicorn.X86_REG_RAX, retVal); err != nil {
 			fmt.Printf("failed to write fake return val to RAX register: %v", err)
 		}
 
@@ -261,7 +276,7 @@ func addAPIHook(uc unicorn.Unicorn, importTable ImportTable, importRegion MemReg
 			fmt.Printf("failed to write return addr to RIP register")
 		}
 
-		fmt.Printf("[api] Intercepted api: %s addr=0x%x ret=0x%x RAX=0x1\n", api, addr, retAddr)
+		fmt.Printf("[api] Intercepted api: %s addr=0x%x ret=0x%x RAX=0x%x\n", api, addr, retAddr, retVal)
 
 		err = uc.RegWrite(unicorn.X86_REG_RSP, rsp+8) // increment SP
 		if err != nil {
