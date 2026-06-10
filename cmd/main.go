@@ -11,10 +11,6 @@ import (
 	"github.com/unicorn-engine/unicorn/bindings/go/unicorn"
 )
 
-const (
-	IMAGE_BASE = 0x140000000
-)
-
 type MemRegion struct {
 	Base  uint64
 	Size  uint64
@@ -32,8 +28,26 @@ type ImportTable struct {
 	ByName    map[string]uint64
 }
 
+type ImageInfo struct {
+	Arch             uint16 // machine arch
+	Magic            uint16
+	ImageBase        uint64
+	EntryPointRVA    uint32
+	EntryPointVA     uint64
+	SizeOfImage      uint32
+	SizeOfHeaders    uint32
+	SectionAlignment uint32
+	Sections         []*pe.Section
+}
+
 func main() {
 	fmt.Println("Initializing the emulator...")
+
+	// parse PE BEFORE creating unicorn
+	f, imageInfo, raw, err := parsePE("testdata/test.exe")
+	if err != nil {
+		log.Fatalf("Failed to parse PE file: %v", err)
+	}
 
 	uc, err := unicorn.NewUnicorn(unicorn.ARCH_X86, unicorn.MODE_64)
 	if err != nil {
@@ -53,13 +67,7 @@ func main() {
 		fmt.Printf("[%s] base=0x%x size=0x%x perms=%d\n", r.Label, r.Base, r.Size, r.Perms)
 	}
 
-	f, raw, err := parsePE("testdata/test.exe")
-	if err != nil {
-		log.Fatalf("Failed to parse PE file: %v", err)
-	}
-	defer raw.Close()
-
-	err = loadPESections(uc, raw, f.Sections)
+	err = loadPESections(uc, raw, imageInfo)
 	if err != nil {
 		log.Fatalf("Failed to load PE Sections: %v", err)
 	}
@@ -67,7 +75,7 @@ func main() {
 	stackRegion := regions[1]
 	importRegion := regions[3]
 
-	importTable, err := patchIAT(uc, f)
+	importTable, err := patchIAT(uc, f, imageInfo)
 	if err != nil {
 		log.Fatalf("Failed to patchIAT: %v", err)
 	}
@@ -76,7 +84,7 @@ func main() {
 		fmt.Printf("[import] addr=0x%x api=%s\n", addr, api)
 	}
 
-	err = setupTEB(uc)
+	err = setupTEB(uc, imageInfo)
 	if err != nil {
 		log.Fatalf("Failed to setup TEB: %v", err)
 	}
@@ -101,8 +109,7 @@ func main() {
 		log.Fatalf("Failed to add API Hook: %v", err)
 	}
 
-	oh := f.OptionalHeader.(*pe.OptionalHeader64)
-	err = executeCode(uc, oh, stackRegion)
+	err = executeCode(uc, stackRegion, imageInfo)
 	if err != nil {
 		log.Fatalf("Failed to execute code: %v", err)
 	}
@@ -154,7 +161,7 @@ func loadCode(uc unicorn.Unicorn, codeRegion MemRegion, shellcode []byte) error 
 	return nil
 }
 
-func executeCode(uc unicorn.Unicorn, oh *pe.OptionalHeader64, stack MemRegion) error {
+func executeCode(uc unicorn.Unicorn, stack MemRegion, imageInfo *ImageInfo) error {
 	const sentinel uint64 = 0xDEAD000000000000
 	rsp := stack.Base + stack.Size - 8 // leave some room for sentinel
 
@@ -168,7 +175,7 @@ func executeCode(uc unicorn.Unicorn, oh *pe.OptionalHeader64, stack MemRegion) e
 	if err := uc.RegWrite(unicorn.X86_REG_RSP, rsp); err != nil {
 		return fmt.Errorf("failed to set RSP: %w", err)
 	}
-	entrypoint := uint64(oh.AddressOfEntryPoint) + IMAGE_BASE
+	entrypoint := imageInfo.EntryPointVA
 	if err := uc.Start(entrypoint, sentinel); err != nil {
 		return err
 	}
@@ -315,50 +322,80 @@ func addAPIHook(uc unicorn.Unicorn, importTable ImportTable, importRegion MemReg
 }
 
 // ------------- PE File ---------------- //
-func parsePE(path string) (*pe.File, *os.File, error) {
-	raw, err := os.Open(path)
+func parsePE(path string) (*pe.File, *ImageInfo, []byte, error) {
+	raw, err := os.ReadFile(path)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to open PE file: %w", err)
+		return nil, nil, nil, fmt.Errorf("failed to read PE file: %w", err)
 	}
 
-	f, err := pe.NewFile(raw)
+	f, err := pe.NewFile(bytes.NewReader(raw))
+
 	if err != nil {
-		raw.Close()
-		return nil, nil, fmt.Errorf("failed to parse PE file: %w\n", err)
+		return nil, nil, nil, fmt.Errorf("failed to parse PE file: %w\n", err)
 	}
+
+	imageInfo := ImageInfo{}
 
 	fmt.Printf("[pe] Number of Sections in file %d\n", f.FileHeader.NumberOfSections)
-	oh, ok := f.OptionalHeader.(*pe.OptionalHeader64)
-	if !ok {
-		raw.Close()
-		return nil, nil, fmt.Errorf("not a 64-bit PE")
+
+	imageInfo.Arch = f.FileHeader.Machine
+	imageInfo.Sections = f.Sections
+
+	switch oh := f.OptionalHeader.(type) {
+	case *pe.OptionalHeader32:
+		imageInfo.ImageBase = uint64(oh.ImageBase)
+		imageInfo.EntryPointRVA = oh.AddressOfEntryPoint
+		imageInfo.Magic = oh.Magic
+		imageInfo.SizeOfImage = oh.SizeOfImage
+		imageInfo.SizeOfHeaders = oh.SizeOfHeaders
+		imageInfo.SectionAlignment = oh.SectionAlignment
+		fmt.Printf("[pe] Image Base: 0x%x\n", imageInfo.ImageBase)
+		fmt.Printf("[pe] Entry point of PE: 0x%x\n", imageInfo.EntryPointRVA)
+	case *pe.OptionalHeader64:
+		imageInfo.ImageBase = uint64(oh.ImageBase)
+		imageInfo.EntryPointRVA = oh.AddressOfEntryPoint
+		imageInfo.Magic = oh.Magic
+		imageInfo.SizeOfImage = oh.SizeOfImage
+		imageInfo.SizeOfHeaders = oh.SizeOfHeaders
+		imageInfo.SectionAlignment = oh.SectionAlignment
+		fmt.Printf("[pe] Image Base: 0x%x\n", imageInfo.ImageBase)
+		fmt.Printf("[pe] Entry point of PE: 0x%x\n", imageInfo.EntryPointRVA)
+	default:
+		return nil, nil, nil, fmt.Errorf("unsupported optional header type %T", f.OptionalHeader)
 	}
 
-	fmt.Printf("[pe] Image Base: 0x%x\n", oh.ImageBase)
-	fmt.Printf("[pe] Entry point of PE: 0x%x\n", oh.AddressOfEntryPoint)
+	imageInfo.EntryPointVA = imageInfo.ImageBase + uint64(imageInfo.EntryPointRVA) // like this? or would this go in each case statement
 
-	for _, section := range f.Sections {
+	for _, section := range imageInfo.Sections {
 		fmt.Printf("[pe] Section name:%-8s - va:0x%x\n", section.Name, section.VirtualAddress)
 	}
 
-	return f, raw, nil
+	return f, &imageInfo, raw, nil
 }
 
-func loadPESections(uc unicorn.Unicorn, raw *os.File, sections []*pe.Section) error {
-	headerBuf := make([]byte, 0x1000)
-	if _, err := raw.ReadAt(headerBuf, 0); err != nil {
-		return fmt.Errorf("failed to read PE headers: %w", err)
+func loadPESections(uc unicorn.Unicorn, raw []byte, imageInfo *ImageInfo) error {
+	if uint64(imageInfo.SizeOfHeaders) > uint64(len(raw)) {
+		return fmt.Errorf(
+			"PE header size 0x%x exceeds file size 0x%x",
+			imageInfo.SizeOfHeaders,
+			len(raw),
+		)
 	}
 
-	if err := uc.MemMapProt(IMAGE_BASE, 0x1000, unicorn.PROT_READ); err != nil {
+	headerBuf := raw[:imageInfo.SizeOfHeaders]
+	pageSize := uint64(0x1000)
+	size := uint64(imageInfo.SizeOfHeaders)
+	alignedSize := (size + pageSize - 1) & ^(pageSize - 1)
+
+	if err := uc.MemMapProt(imageInfo.ImageBase, alignedSize, unicorn.PROT_READ); err != nil {
 		return fmt.Errorf("failed to mape PE header region: %w", err)
 	}
 
-	if err := uc.MemWrite(IMAGE_BASE, headerBuf); err != nil {
+	if err := uc.MemWrite(imageInfo.ImageBase, headerBuf); err != nil {
 		return fmt.Errorf("failed to write PE headers to memory: %w", err)
 	}
 
-	fmt.Printf("[pe] Loaded headers addr=0x%x size=0x1000\n", IMAGE_BASE)
+	fmt.Printf("[pe] Loaded headers addr=0x%x size=0x%x\n", imageInfo.ImageBase, alignedSize)
 
 	permsBySection := map[string]int{
 		".text":  unicorn.PROT_READ | unicorn.PROT_EXEC,
@@ -368,7 +405,7 @@ func loadPESections(uc unicorn.Unicorn, raw *os.File, sections []*pe.Section) er
 		".bss":   unicorn.PROT_READ | unicorn.PROT_WRITE,
 	}
 
-	for _, section := range sections {
+	for _, section := range imageInfo.Sections {
 		perms, ok := permsBySection[section.Name]
 		if !ok {
 			fmt.Printf("[pe] Skipping section %-8s\n", section.Name)
@@ -376,7 +413,7 @@ func loadPESections(uc unicorn.Unicorn, raw *os.File, sections []*pe.Section) er
 		}
 
 		alignedSize := (uint64(section.VirtualSize) + 0xFFF) & ^uint64(0xFFF)
-		mapMemAddr := IMAGE_BASE + uint64(section.VirtualAddress)
+		mapMemAddr := imageInfo.ImageBase + uint64(section.VirtualAddress)
 
 		if err := uc.MemMapProt(mapMemAddr, alignedSize, perms); err != nil {
 			return fmt.Errorf("failed to map section %s at 0x%x: %w", section.Name, mapMemAddr, err)
@@ -397,7 +434,7 @@ func loadPESections(uc unicorn.Unicorn, raw *os.File, sections []*pe.Section) er
 	return nil
 }
 
-func patchIAT(uc unicorn.Unicorn, f *pe.File) (ImportTable, error) {
+func patchIAT(uc unicorn.Unicorn, f *pe.File, imageInfo *ImageInfo) (ImportTable, error) {
 	importTable := ImportTable{
 		ByAddress: make(map[uint64]string),
 		ByName:    make(map[string]uint64),
@@ -405,6 +442,7 @@ func patchIAT(uc unicorn.Unicorn, f *pe.File) (ImportTable, error) {
 
 	alloc := makeStubAllocator(0x4000000)
 
+	// do we still need to do this here? I assume yes because we dont store the OptionalHeader in our ImageInfo struct
 	oh, ok := f.OptionalHeader.(*pe.OptionalHeader64)
 	if !ok {
 		return ImportTable{}, fmt.Errorf("not a 64-bit PE")
@@ -418,8 +456,8 @@ func patchIAT(uc unicorn.Unicorn, f *pe.File) (ImportTable, error) {
 		FirstThunk         uint32 // ptr to IAT
 	}
 
-	importDirectory := oh.DataDirectory[pe.IMAGE_DIRECTORY_ENTRY_IMPORT]
-	importsAddr := uint64(importDirectory.VirtualAddress) + IMAGE_BASE // this is the rva where all the imports are in the PE file
+	importDirectory := oh.DataDirectory[pe.IMAGE_DIRECTORY_ENTRY_IMPORT]        // could we save this in ImageInfo?
+	importsAddr := uint64(importDirectory.VirtualAddress) + imageInfo.ImageBase // this is the rva where all the imports are in the PE file
 
 	for {
 		dllBytes, err := uc.MemRead(uint64(importsAddr), 20)
@@ -436,7 +474,7 @@ func patchIAT(uc unicorn.Unicorn, f *pe.File) (ImportTable, error) {
 			break
 		}
 
-		nameBuf, err := uc.MemRead(IMAGE_BASE+uint64(dll.Name), 64)
+		nameBuf, err := uc.MemRead(imageInfo.ImageBase+uint64(dll.Name), 64)
 		if err != nil {
 			return ImportTable{}, fmt.Errorf("[pe:dll] failed to read dll name %d: %w\n", dll.Name, err)
 		}
@@ -445,8 +483,8 @@ func patchIAT(uc unicorn.Unicorn, f *pe.File) (ImportTable, error) {
 			fmt.Printf("[pe:dll] %s\n", string(nameBuf[:nullIdx]))
 		}
 
-		intBase := IMAGE_BASE + uint64(dll.OriginalFirstThunk)
-		iatBase := IMAGE_BASE + uint64(dll.FirstThunk)
+		intBase := imageInfo.ImageBase + uint64(dll.OriginalFirstThunk)
+		iatBase := imageInfo.ImageBase + uint64(dll.FirstThunk)
 
 		// inner loop goes here
 		for i := 0; ; i++ {
@@ -463,7 +501,7 @@ func patchIAT(uc unicorn.Unicorn, f *pe.File) (ImportTable, error) {
 				continue
 			}
 
-			fnNameBuf, _ := uc.MemRead(IMAGE_BASE+intEntry+2, 64)
+			fnNameBuf, _ := uc.MemRead(imageInfo.ImageBase+intEntry+2, 64)
 
 			if nullIdx := bytes.IndexByte(fnNameBuf, 0); nullIdx != -1 {
 				fmt.Printf("[pe:dll:fn] %s\n", string(fnNameBuf[:nullIdx]))
@@ -496,7 +534,7 @@ func patchIAT(uc unicorn.Unicorn, f *pe.File) (ImportTable, error) {
 	return importTable, nil
 }
 
-func setupTEB(uc unicorn.Unicorn) error {
+func setupTEB(uc unicorn.Unicorn, imageInfo *ImageInfo) error {
 	memRegions := []MemRegion{
 		{Base: 0x5000000, Size: 0x10000, Perms: unicorn.PROT_READ | unicorn.PROT_WRITE, Label: "teb"},
 		{Base: 0x6000000, Size: 0x10000, Perms: unicorn.PROT_READ | unicorn.PROT_WRITE, Label: "peb"},
@@ -519,7 +557,7 @@ func setupTEB(uc unicorn.Unicorn) error {
 		return fmt.Errorf("failed to write peb addr into teb: %w", err)
 	}
 
-	binary.LittleEndian.PutUint64(buf, IMAGE_BASE)
+	binary.LittleEndian.PutUint64(buf, imageInfo.ImageBase)
 	err = uc.MemWrite(peb.Base+0x10, buf)
 	if err != nil {
 		return fmt.Errorf("failed to write image base into peb: %w", err)
