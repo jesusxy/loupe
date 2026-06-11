@@ -49,13 +49,24 @@ func main() {
 		log.Fatalf("Failed to parse PE file: %v", err)
 	}
 
-	uc, err := unicorn.NewUnicorn(unicorn.ARCH_X86, unicorn.MODE_64)
+	var mode int
+
+	switch imageInfo.Arch {
+	case pe.IMAGE_FILE_MACHINE_I386:
+		mode = unicorn.MODE_32
+	case pe.IMAGE_FILE_MACHINE_AMD64:
+		mode = unicorn.MODE_64
+	default:
+		log.Fatalf("Unsupported PE machine: 0x%x", imageInfo.Arch)
+	}
+
+	uc, err := unicorn.NewUnicorn(unicorn.ARCH_X86, mode)
 	if err != nil {
 		log.Fatalf("Failed to initialize the emulator %v", err)
 	}
 	defer uc.Close()
 
-	fmt.Println("Successfully initialized X86-64 emulator")
+	fmt.Println("Successfully initialized emulator")
 
 	// map memory
 	regions, err := setupMem(uc)
