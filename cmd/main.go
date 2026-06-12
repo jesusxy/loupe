@@ -11,6 +11,11 @@ import (
 	"github.com/unicorn-engine/unicorn/bindings/go/unicorn"
 )
 
+const (
+	optionalHeaderMagicPE32     uint16 = 0x10b
+	optionalHeaderMagicPE32Plus uint16 = 0x20b
+)
+
 type MemRegion struct {
 	Base  uint64
 	Size  uint64
@@ -375,7 +380,20 @@ func parsePE(path string) (*pe.File, *ImageInfo, []byte, error) {
 		return nil, nil, nil, fmt.Errorf("unsupported optional header type %T", f.OptionalHeader)
 	}
 
-	imageInfo.EntryPointVA = imageInfo.ImageBase + uint64(imageInfo.EntryPointRVA) // like this? or would this go in each case statement
+	valid32 := imageInfo.Arch == pe.IMAGE_FILE_MACHINE_I386 &&
+		imageInfo.Magic == optionalHeaderMagicPE32
+	valid64 := imageInfo.Arch == pe.IMAGE_FILE_MACHINE_AMD64 &&
+		imageInfo.Magic == optionalHeaderMagicPE32Plus
+
+	if !valid32 && !valid64 {
+		return nil, nil, nil, fmt.Errorf(
+			"unsupported or inconsistent PE architecture: machine 0x%x magic=0x%x",
+			imageInfo.Arch,
+			imageInfo.Magic,
+		)
+	}
+
+	imageInfo.EntryPointVA = imageInfo.ImageBase + uint64(imageInfo.EntryPointRVA)
 
 	for _, section := range imageInfo.Sections {
 		fmt.Printf("[pe] Section name:%-8s - va:0x%x\n", section.Name, section.VirtualAddress)
