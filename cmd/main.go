@@ -178,18 +178,34 @@ func loadCode(uc unicorn.Unicorn, codeRegion MemRegion, shellcode []byte) error 
 }
 
 func executeCode(uc unicorn.Unicorn, stack MemRegion, imageInfo *ImageInfo) error {
-	const sentinel uint64 = 0xDEAD000000000000
-	rsp := stack.Base + stack.Size - 8 // leave some room for sentinel
+	var sentinel uint64
+	var sentinelBytes []byte
+	var stackRegister int
+	var stackPointer uint64
 
-	buf := make([]byte, 8)
-	binary.LittleEndian.PutUint64(buf, sentinel)
+	switch imageInfo.Arch {
+	case pe.IMAGE_FILE_MACHINE_I386:
+		sentinel = 0xDEAD0000
+		stackPointer = stack.Base + stack.Size - 4
+		sentinelBytes = make([]byte, 4)
+		binary.LittleEndian.PutUint32(sentinelBytes, uint32(sentinel))
+		stackRegister = unicorn.X86_REG_ESP
+	case pe.IMAGE_FILE_MACHINE_AMD64:
+		sentinel = 0xDEAD000000000000
+		stackPointer = stack.Base + stack.Size - 8
+		sentinelBytes = make([]byte, 8)
+		binary.LittleEndian.PutUint64(sentinelBytes, sentinel)
+		stackRegister = unicorn.X86_REG_RSP
+	default:
+		return fmt.Errorf("unsupported architecture")
+	}
 
-	if err := uc.MemWrite(rsp, buf); err != nil {
+	if err := uc.MemWrite(stackPointer, sentinelBytes); err != nil {
 		return fmt.Errorf("failed to write sentinel return address: %w", err)
 	}
 
-	if err := uc.RegWrite(unicorn.X86_REG_RSP, rsp); err != nil {
-		return fmt.Errorf("failed to set RSP: %w", err)
+	if err := uc.RegWrite(stackRegister, stackPointer); err != nil {
+		return fmt.Errorf("failed to set stack pointer: %w", err)
 	}
 	entrypoint := imageInfo.EntryPointVA
 	if err := uc.Start(entrypoint, sentinel); err != nil {
