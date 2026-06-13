@@ -50,7 +50,7 @@ func main() {
 	fmt.Println("Initializing the emulator...")
 
 	// parse PE BEFORE creating unicorn
-	f, imageInfo, raw, err := parsePE("testdata/test.exe")
+	imageInfo, raw, err := parsePE("testdata/test.exe")
 	if err != nil {
 		log.Fatalf("Failed to parse PE file: %v", err)
 	}
@@ -355,16 +355,16 @@ func addAPIHook(uc unicorn.Unicorn, importTable ImportTable, importRegion MemReg
 }
 
 // ------------- PE File ---------------- //
-func parsePE(path string) (*pe.File, *ImageInfo, []byte, error) {
+func parsePE(path string) (*ImageInfo, []byte, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to read PE file: %w", err)
+		return nil, nil, fmt.Errorf("failed to read PE file: %w", err)
 	}
 
 	f, err := pe.NewFile(bytes.NewReader(raw))
 
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to parse PE file: %w\n", err)
+		return nil, nil, fmt.Errorf("failed to parse PE file: %w\n", err)
 	}
 
 	imageInfo := ImageInfo{}
@@ -396,7 +396,7 @@ func parsePE(path string) (*pe.File, *ImageInfo, []byte, error) {
 		fmt.Printf("[pe] Image Base: 0x%x\n", imageInfo.ImageBase)
 		fmt.Printf("[pe] Entry point of PE: 0x%x\n", imageInfo.EntryPointRVA)
 	default:
-		return nil, nil, nil, fmt.Errorf("unsupported optional header type %T", f.OptionalHeader)
+		return nil, nil, fmt.Errorf("unsupported optional header type %T", f.OptionalHeader)
 	}
 
 	valid32 := imageInfo.Arch == pe.IMAGE_FILE_MACHINE_I386 &&
@@ -405,7 +405,7 @@ func parsePE(path string) (*pe.File, *ImageInfo, []byte, error) {
 		imageInfo.Magic == optionalHeaderMagicPE32Plus
 
 	if !valid32 && !valid64 {
-		return nil, nil, nil, fmt.Errorf(
+		return nil, nil, fmt.Errorf(
 			"unsupported or inconsistent PE architecture: machine 0x%x magic=0x%x",
 			imageInfo.Arch,
 			imageInfo.Magic,
@@ -418,7 +418,7 @@ func parsePE(path string) (*pe.File, *ImageInfo, []byte, error) {
 		fmt.Printf("[pe] Section name:%-8s - va:0x%x\n", section.Name, section.VirtualAddress)
 	}
 
-	return f, &imageInfo, raw, nil
+	return &imageInfo, raw, nil
 }
 
 func loadPESections(uc unicorn.Unicorn, raw []byte, imageInfo *ImageInfo) error {
@@ -488,89 +488,145 @@ func patchIAT(uc unicorn.Unicorn, imageInfo *ImageInfo) (ImportTable, error) {
 		ByName:    make(map[string]uint64),
 	}
 
-	alloc := makeStubAllocator(0x4000000)
-
-	var dll struct {
-		OriginalFirstThunk uint32 // ptr to the INT
-		TimeDataStamp      uint32
-		ForwarderChain     uint32
-		Name               uint32
-		FirstThunk         uint32 // ptr to IAT
+	importDirectory := imageInfo.ImportDataDirectory
+	if importDirectory.VirtualAddress == 0 {
+		return importTable, nil
 	}
 
-	importDirectory := imageInfo.ImportDataDirectory
-	importsAddr := uint64(importDirectory.VirtualAddress) + imageInfo.ImageBase // this is the rva where all the imports are in the PE file
+	var importEntrySize uint64
+	var ordinalMask uint64
+	var decodeImportEntry func([]byte) uint64
+	var encodeImportAddress func(uint64) ([]byte, error)
+
+	switch imageInfo.Arch {
+	case pe.IMAGE_FILE_MACHINE_I386:
+		importEntrySize = 4
+		ordinalMask = 0x80000000
+		decodeImportEntry = func(data []byte) uint64 {
+			return uint64(binary.LittleEndian.Uint32(data))
+		}
+		encodeImportAddress = func(address uint64) ([]byte, error) {
+			if address > uint64(^uint32(0)) {
+				return nil, fmt.Errorf("import stub address 0x%x exceeds 32-bit address space", address)
+			}
+
+			data := make([]byte, importEntrySize)
+			binary.LittleEndian.PutUint32(data, uint32(address))
+			return data, nil
+		}
+	case pe.IMAGE_FILE_MACHINE_AMD64:
+		importEntrySize = 8
+		ordinalMask = 0x8000000000000000
+		decodeImportEntry = func(data []byte) uint64 {
+			return binary.LittleEndian.Uint64(data)
+		}
+		encodeImportAddress = func(address uint64) ([]byte, error) {
+			data := make([]byte, importEntrySize)
+			binary.LittleEndian.PutUint64(data, address)
+			return data, nil
+		}
+	default:
+		return ImportTable{}, fmt.Errorf("unsupported architecture for IAT patching: 0x%x", imageInfo.Arch)
+	}
+
+	alloc := makeStubAllocator(0x4000000)
+
+	var dllDescriptor struct {
+		OriginalFirstThunk uint32
+		TimeDateStamp      uint32
+		ForwarderChain     uint32
+		NameRVA            uint32
+		FirstThunk         uint32
+	}
+
+	const importDescriptorSize uint64 = 20
+	dllDescriptorAddress := imageInfo.ImageBase + uint64(importDirectory.VirtualAddress)
 
 	for {
-		dllBytes, err := uc.MemRead(uint64(importsAddr), 20)
+		dllDescriptorBytes, err := uc.MemRead(dllDescriptorAddress, importDescriptorSize)
 		if err != nil {
-			return ImportTable{}, fmt.Errorf("failed to read import dll: %w", err)
+			return ImportTable{}, fmt.Errorf("failed to read DLL import descriptor at 0x%x: %w", dllDescriptorAddress, err)
 		}
 
-		err = binary.Read(bytes.NewReader(dllBytes), binary.LittleEndian, &dll)
+		err = binary.Read(bytes.NewReader(dllDescriptorBytes), binary.LittleEndian, &dllDescriptor)
 		if err != nil {
-			return ImportTable{}, fmt.Errorf("failed to read bytes into DLL structure: %w", err)
+			return ImportTable{}, fmt.Errorf("failed to decode DLL import descriptor at 0x%x: %w", dllDescriptorAddress, err)
 		}
 
-		if dll.OriginalFirstThunk == 0 && dll.FirstThunk == 0 {
+		if dllDescriptor.OriginalFirstThunk == 0 && dllDescriptor.FirstThunk == 0 {
 			break
 		}
 
-		nameBuf, err := uc.MemRead(imageInfo.ImageBase+uint64(dll.Name), 64)
+		nameBuf, err := uc.MemRead(imageInfo.ImageBase+uint64(dllDescriptor.NameRVA), 64)
 		if err != nil {
-			return ImportTable{}, fmt.Errorf("[pe:dll] failed to read dll name %d: %w\n", dll.Name, err)
+			return ImportTable{}, fmt.Errorf("[pe:dll] failed to read DLL name at RVA 0x%x: %w", dllDescriptor.NameRVA, err)
 		}
 
 		if nullIdx := bytes.IndexByte(nameBuf, 0); nullIdx != -1 {
 			fmt.Printf("[pe:dll] %s\n", string(nameBuf[:nullIdx]))
 		}
 
-		intBase := imageInfo.ImageBase + uint64(dll.OriginalFirstThunk)
-		iatBase := imageInfo.ImageBase + uint64(dll.FirstThunk)
+		lookupTableRVA := dllDescriptor.OriginalFirstThunk
+		if lookupTableRVA == 0 {
+			lookupTableRVA = dllDescriptor.FirstThunk
+		}
 
-		// inner loop goes here
+		lookupTableBase := imageInfo.ImageBase + uint64(lookupTableRVA)
+		iatBase := imageInfo.ImageBase + uint64(dllDescriptor.FirstThunk)
+
 		for i := 0; ; i++ {
-			hnTable, _ := uc.MemRead(intBase+(uint64(i)*8), 8)
-			intEntry := binary.LittleEndian.Uint64(hnTable)
+			entryOffset := uint64(i) * importEntrySize
+			entryAddress := lookupTableBase + entryOffset
+			entryBytes, err := uc.MemRead(entryAddress, importEntrySize)
+			if err != nil {
+				return ImportTable{}, fmt.Errorf("failed to read import lookup entry at 0x%x: %w", entryAddress, err)
+			}
 
-			if intEntry == 0 {
+			lookupEntry := decodeImportEntry(entryBytes)
+
+			if lookupEntry == 0 {
 				break
 			}
 
-			if intEntry&0x8000000000000000 != 0 {
-				// ordinal import - skip for now
-				fmt.Printf("[pe:dll:fn] ordinal=0x%x (skipped)\n", intEntry&0xFFFF)
+			if lookupEntry&ordinalMask != 0 {
+				fmt.Printf("[pe:dll:fn] ordinal=0x%x (skipped)\n", lookupEntry&0xFFFF)
 				continue
 			}
 
-			fnNameBuf, _ := uc.MemRead(imageInfo.ImageBase+intEntry+2, 64)
+			functionNameAddress := imageInfo.ImageBase + lookupEntry + 2
+			functionNameBytes, err := uc.MemRead(functionNameAddress, 64)
+			if err != nil {
+				return ImportTable{}, fmt.Errorf("failed to read import function name at 0x%x: %w", functionNameAddress, err)
+			}
 
-			if nullIdx := bytes.IndexByte(fnNameBuf, 0); nullIdx != -1 {
-				fmt.Printf("[pe:dll:fn] %s\n", string(fnNameBuf[:nullIdx]))
-				fnName := string(fnNameBuf[:nullIdx])
+			if nullIdx := bytes.IndexByte(functionNameBytes, 0); nullIdx != -1 {
+				functionName := string(functionNameBytes[:nullIdx])
+				fmt.Printf("[pe:dll:fn] %s\n", functionName)
 
 				stubAddr := alloc()
 
-				err := uc.MemWrite(stubAddr, []byte{0xC3})
+				if err := uc.MemWrite(stubAddr, []byte{0xC3}); err != nil {
+					return ImportTable{}, fmt.Errorf("failed to write RET to stub address 0x%x: %w", stubAddr, err)
+				}
+
+				importTable.ByName[functionName] = stubAddr
+				importTable.ByAddress[stubAddr] = functionName
+
+				encodedStubAddress, err := encodeImportAddress(stubAddr)
 				if err != nil {
-					return ImportTable{}, fmt.Errorf("failed to write RET to stub addr 0x%x : %w", stubAddr, err)
+					return ImportTable{}, fmt.Errorf("failed to encode IAT entry for %s: %w", functionName, err)
 				}
 
-				importTable.ByName[fnName] = stubAddr
-				importTable.ByAddress[stubAddr] = fnName
-
-				b := make([]byte, 8)
-				binary.LittleEndian.PutUint64(b, stubAddr)
-				if err := uc.MemWrite(iatBase+(uint64(i)*8), b); err != nil {
-					return ImportTable{}, fmt.Errorf("failed to write to IAT entry for %s: %w", fnName, err)
+				iatEntryAddress := iatBase + entryOffset
+				if err := uc.MemWrite(iatEntryAddress, encodedStubAddress); err != nil {
+					return ImportTable{}, fmt.Errorf("failed to write IAT entry for %s at 0x%x: %w", functionName, iatEntryAddress, err)
 				}
 
-				fmt.Printf("[iatpatch] %s=0x%x\n", fnName, stubAddr)
+				fmt.Printf("[iatpatch] %s=0x%x\n", functionName, stubAddr)
 			}
 		}
 
-		importsAddr += 20
-
+		dllDescriptorAddress += importDescriptorSize
 	}
 
 	return importTable, nil
