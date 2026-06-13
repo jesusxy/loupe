@@ -34,15 +34,16 @@ type ImportTable struct {
 }
 
 type ImageInfo struct {
-	Arch             uint16 // machine arch
-	Magic            uint16
-	ImageBase        uint64
-	EntryPointRVA    uint32
-	EntryPointVA     uint64
-	SizeOfImage      uint32
-	SizeOfHeaders    uint32
-	SectionAlignment uint32
-	Sections         []*pe.Section
+	Arch                uint16 // machine arch
+	Magic               uint16
+	ImageBase           uint64
+	ImportDataDirectory pe.DataDirectory
+	EntryPointRVA       uint32
+	EntryPointVA        uint64
+	SizeOfImage         uint32
+	SizeOfHeaders       uint32
+	SectionAlignment    uint32
+	Sections            []*pe.Section
 }
 
 func main() {
@@ -91,7 +92,7 @@ func main() {
 	stackRegion := regions[1]
 	importRegion := regions[3]
 
-	importTable, err := patchIAT(uc, f, imageInfo)
+	importTable, err := patchIAT(uc, imageInfo)
 	if err != nil {
 		log.Fatalf("Failed to patchIAT: %v", err)
 	}
@@ -378,6 +379,7 @@ func parsePE(path string) (*pe.File, *ImageInfo, []byte, error) {
 		imageInfo.ImageBase = uint64(oh.ImageBase)
 		imageInfo.EntryPointRVA = oh.AddressOfEntryPoint
 		imageInfo.Magic = oh.Magic
+		imageInfo.ImportDataDirectory = oh.DataDirectory[pe.IMAGE_DIRECTORY_ENTRY_IMPORT]
 		imageInfo.SizeOfImage = oh.SizeOfImage
 		imageInfo.SizeOfHeaders = oh.SizeOfHeaders
 		imageInfo.SectionAlignment = oh.SectionAlignment
@@ -387,6 +389,7 @@ func parsePE(path string) (*pe.File, *ImageInfo, []byte, error) {
 		imageInfo.ImageBase = uint64(oh.ImageBase)
 		imageInfo.EntryPointRVA = oh.AddressOfEntryPoint
 		imageInfo.Magic = oh.Magic
+		imageInfo.ImportDataDirectory = oh.DataDirectory[pe.IMAGE_DIRECTORY_ENTRY_IMPORT]
 		imageInfo.SizeOfImage = oh.SizeOfImage
 		imageInfo.SizeOfHeaders = oh.SizeOfHeaders
 		imageInfo.SectionAlignment = oh.SectionAlignment
@@ -479,19 +482,13 @@ func loadPESections(uc unicorn.Unicorn, raw []byte, imageInfo *ImageInfo) error 
 	return nil
 }
 
-func patchIAT(uc unicorn.Unicorn, f *pe.File, imageInfo *ImageInfo) (ImportTable, error) {
+func patchIAT(uc unicorn.Unicorn, imageInfo *ImageInfo) (ImportTable, error) {
 	importTable := ImportTable{
 		ByAddress: make(map[uint64]string),
 		ByName:    make(map[string]uint64),
 	}
 
 	alloc := makeStubAllocator(0x4000000)
-
-	// do we still need to do this here? I assume yes because we dont store the OptionalHeader in our ImageInfo struct
-	oh, ok := f.OptionalHeader.(*pe.OptionalHeader64)
-	if !ok {
-		return ImportTable{}, fmt.Errorf("not a 64-bit PE")
-	}
 
 	var dll struct {
 		OriginalFirstThunk uint32 // ptr to the INT
@@ -501,7 +498,7 @@ func patchIAT(uc unicorn.Unicorn, f *pe.File, imageInfo *ImageInfo) (ImportTable
 		FirstThunk         uint32 // ptr to IAT
 	}
 
-	importDirectory := oh.DataDirectory[pe.IMAGE_DIRECTORY_ENTRY_IMPORT]        // could we save this in ImageInfo?
+	importDirectory := imageInfo.ImportDataDirectory
 	importsAddr := uint64(importDirectory.VirtualAddress) + imageInfo.ImageBase // this is the rva where all the imports are in the PE file
 
 	for {
