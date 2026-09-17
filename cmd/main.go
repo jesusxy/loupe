@@ -5,15 +5,12 @@ import (
 	"debug/pe"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"log"
+	"loupe/inspect"
 	"os"
 
 	"github.com/unicorn-engine/unicorn/bindings/go/unicorn"
-)
-
-const (
-	optionalHeaderMagicPE32     uint16 = 0x10b
-	optionalHeaderMagicPE32Plus uint16 = 0x20b
 )
 
 type MemRegion struct {
@@ -33,18 +30,7 @@ type ImportTable struct {
 	ByName    map[string]uint64
 }
 
-type ImageInfo struct {
-	Arch                uint16 // machine arch
-	Magic               uint16
-	ImageBase           uint64
-	ImportDataDirectory pe.DataDirectory
-	EntryPointRVA       uint32
-	EntryPointVA        uint64
-	SizeOfImage         uint32
-	SizeOfHeaders       uint32
-	SectionAlignment    uint32
-	Sections            []*pe.Section
-}
+type ImageInfo = inspect.ImageInfo
 
 func main() {
 	fmt.Println("Initializing the emulator...")
@@ -356,69 +342,20 @@ func addAPIHook(uc unicorn.Unicorn, importTable ImportTable, importRegion MemReg
 
 // ------------- PE File ---------------- //
 func parsePE(path string) (*ImageInfo, []byte, error) {
-	raw, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to read PE file: %w", err)
+		return nil, nil, err
 	}
-
-	f, err := pe.NewFile(bytes.NewReader(raw))
-
+	defer f.Close()
+	raw, err := io.ReadAll(io.LimitReader(f, inspect.MaxFileSize+1))
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to parse PE file: %w\n", err)
+		return nil, nil, err
 	}
-
-	imageInfo := ImageInfo{}
-
-	fmt.Printf("[pe] Number of Sections in file %d\n", f.FileHeader.NumberOfSections)
-
-	imageInfo.Arch = f.FileHeader.Machine
-	imageInfo.Sections = f.Sections
-
-	switch oh := f.OptionalHeader.(type) {
-	case *pe.OptionalHeader32:
-		imageInfo.ImageBase = uint64(oh.ImageBase)
-		imageInfo.EntryPointRVA = oh.AddressOfEntryPoint
-		imageInfo.Magic = oh.Magic
-		imageInfo.ImportDataDirectory = oh.DataDirectory[pe.IMAGE_DIRECTORY_ENTRY_IMPORT]
-		imageInfo.SizeOfImage = oh.SizeOfImage
-		imageInfo.SizeOfHeaders = oh.SizeOfHeaders
-		imageInfo.SectionAlignment = oh.SectionAlignment
-		fmt.Printf("[pe] Image Base: 0x%x\n", imageInfo.ImageBase)
-		fmt.Printf("[pe] Entry point of PE: 0x%x\n", imageInfo.EntryPointRVA)
-	case *pe.OptionalHeader64:
-		imageInfo.ImageBase = uint64(oh.ImageBase)
-		imageInfo.EntryPointRVA = oh.AddressOfEntryPoint
-		imageInfo.Magic = oh.Magic
-		imageInfo.ImportDataDirectory = oh.DataDirectory[pe.IMAGE_DIRECTORY_ENTRY_IMPORT]
-		imageInfo.SizeOfImage = oh.SizeOfImage
-		imageInfo.SizeOfHeaders = oh.SizeOfHeaders
-		imageInfo.SectionAlignment = oh.SectionAlignment
-		fmt.Printf("[pe] Image Base: 0x%x\n", imageInfo.ImageBase)
-		fmt.Printf("[pe] Entry point of PE: 0x%x\n", imageInfo.EntryPointRVA)
-	default:
-		return nil, nil, fmt.Errorf("unsupported optional header type %T", f.OptionalHeader)
+	image, err := inspect.Parse(raw)
+	if err != nil {
+		return nil, nil, err
 	}
-
-	valid32 := imageInfo.Arch == pe.IMAGE_FILE_MACHINE_I386 &&
-		imageInfo.Magic == optionalHeaderMagicPE32
-	valid64 := imageInfo.Arch == pe.IMAGE_FILE_MACHINE_AMD64 &&
-		imageInfo.Magic == optionalHeaderMagicPE32Plus
-
-	if !valid32 && !valid64 {
-		return nil, nil, fmt.Errorf(
-			"unsupported or inconsistent PE architecture: machine 0x%x magic=0x%x",
-			imageInfo.Arch,
-			imageInfo.Magic,
-		)
-	}
-
-	imageInfo.EntryPointVA = imageInfo.ImageBase + uint64(imageInfo.EntryPointRVA)
-
-	for _, section := range imageInfo.Sections {
-		fmt.Printf("[pe] Section name:%-8s - va:0x%x\n", section.Name, section.VirtualAddress)
-	}
-
-	return &imageInfo, raw, nil
+	return image, raw, nil
 }
 
 func loadPESections(uc unicorn.Unicorn, raw []byte, imageInfo *ImageInfo) error {
