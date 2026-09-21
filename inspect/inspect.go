@@ -11,7 +11,6 @@ import (
 const (
 	optionalHeaderMagicPE32     uint16 = 0x10b
 	optionalHeaderMagicPE32Plus uint16 = 0x20b
-	MaxFileSize                        = 16 << 20
 	MaxSections                        = 96
 )
 
@@ -29,7 +28,8 @@ type ImageInfo struct {
 }
 
 // Parse extracts the same image model used by Loupe's native loader.
-// Preflight bounds every debug/pe allocation path before calling that package.
+// Callers must enforce their file-size budget before reading input into memory.
+// Preflight checks structural ranges and caps eagerly read metadata.
 func Parse(raw []byte) (info *ImageInfo, err error) {
 	defer func() {
 		if recover() != nil {
@@ -37,14 +37,17 @@ func Parse(raw []byte) (info *ImageInfo, err error) {
 			err = fmt.Errorf("malformed PE structure")
 		}
 	}()
+
 	if err := validate(raw); err != nil {
 		return nil, err
 	}
+
 	f, err := pe.NewFile(bytes.NewReader(raw))
 	if err != nil {
 		return nil, fmt.Errorf("invalid PE: %w", err)
 	}
 	defer f.Close()
+
 	imageInfo := ImageInfo{}
 
 	imageInfo.Arch = f.FileHeader.Machine
@@ -89,9 +92,11 @@ func Parse(raw []byte) (info *ImageInfo, err error) {
 			return nil, fmt.Errorf("section name exceeds 256 bytes")
 		}
 	}
+
 	if imageInfo.ImageBase > ^uint64(0)-uint64(imageInfo.EntryPointRVA) {
 		return nil, fmt.Errorf("entry point address overflows")
 	}
+
 	imageInfo.EntryPointVA = imageInfo.ImageBase + uint64(imageInfo.EntryPointRVA)
 
 	return &imageInfo, nil
@@ -101,29 +106,32 @@ func span(raw []byte, offset, size uint64) bool {
 }
 
 func validate(b []byte) error {
-	if len(b) > MaxFileSize {
-		return fmt.Errorf("file exceeds 16 MiB limit")
-	}
 	if len(b) < 96 || string(b[:2]) != "MZ" {
 		return fmt.Errorf("expected a Windows PE file with an MZ header")
 	}
+
 	u16 := func(o uint64) uint64 { return uint64(binary.LittleEndian.Uint16(b[o : o+2])) }
 	u32 := func(o uint64) uint64 { return uint64(binary.LittleEndian.Uint32(b[o : o+4])) }
-	peoff := u32(0x3c)
+	peoff := u32(0x3c) // what does the hex mean
+
 	if peoff < 64 || !span(b, peoff, 24) || string(b[peoff:peoff+4]) != "PE\x00\x00" {
 		return fmt.Errorf("invalid PE signature or header offset")
 	}
 	coff := peoff + 4
 	sections, optSize := u16(coff+2), u16(coff+16)
+
 	if sections == 0 || sections > MaxSections {
 		return fmt.Errorf("supported section count is 1–96")
 	}
+
 	opt := coff + 20
 	if !span(b, opt, optSize) || optSize < 96 {
 		return fmt.Errorf("truncated optional header")
 	}
+
 	machine, magic := u16(coff), u16(opt)
 	var directoryStart uint64
+
 	switch {
 	case machine == 0x14c && magic == 0x10b:
 		directoryStart = 96
@@ -132,23 +140,30 @@ func validate(b []byte) error {
 	default:
 		return fmt.Errorf("supported formats are x86 PE32 and x86-64 PE32+")
 	}
+
 	if optSize < directoryStart {
 		return fmt.Errorf("truncated optional header")
 	}
+
 	dirs := u32(opt + directoryStart - 4)
+
 	if dirs > 16 || optSize != directoryStart+8*dirs {
 		return fmt.Errorf("invalid data-directory count or optional-header size")
 	}
+
 	table := opt + optSize
+
 	if !span(b, table, sections*40) {
 		return fmt.Errorf("truncated section table")
 	}
 	headers := u32(opt + 60)
+
 	if headers < table+sections*40 || headers > uint64(len(b)) {
 		return fmt.Errorf("invalid SizeOfHeaders")
 	}
+
 	// debug/pe eagerly reads COFF symbols, string tables and relocations.
-	// Bound all three, including records not used in the public inspector.
+	// Bound all three, including records not used in the public inspector. huh? wth does this mean
 	symbols, count := u32(coff+8), u32(coff+12)
 	if count > 65536 {
 		return fmt.Errorf("COFF symbol limit exceeded")
@@ -163,6 +178,7 @@ func validate(b []byte) error {
 			return fmt.Errorf("invalid COFF string table")
 		}
 	}
+
 	for i := uint64(0); i < sections; i++ {
 		s := table + i*40
 		size, offset := u32(s+16), u32(s+20)

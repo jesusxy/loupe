@@ -91,8 +91,19 @@ func TestMalformed(t *testing.T) {
 			t.Fatalf("accepted truncation at %d", n)
 		}
 	}
-	if _, err := Parse(make([]byte, MaxFileSize+1)); err == nil {
-		t.Fatal("accepted oversized file")
+}
+func TestFileSizeIsCallerPolicy(t *testing.T) {
+	// A trailing overlay must not make the core apply the browser's 16 MiB budget.
+	b := make([]byte, (17<<20)+1)
+	copy(b, fixture(true))
+	info, err := Parse(b)
+	if err != nil || info == nil || info.EntryPointVA != 0x140001000 {
+		t.Fatalf("larger image: info=%+v, err=%v", info, err)
+	}
+	// Larger inputs still go through structural validation.
+	b[0] = 0
+	if _, err := Parse(b); err == nil {
+		t.Fatal("accepted malformed larger image")
 	}
 }
 func FuzzParse(f *testing.F) {

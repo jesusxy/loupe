@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"debug/pe"
 	"encoding/binary"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -32,14 +33,57 @@ type ImportTable struct {
 
 type ImageInfo = inspect.ImageInfo
 
+const defaultMaxFileSizeMiB = 256
+
+type cliOptions struct {
+	path        string
+	maxFileSize int64
+}
+
+func parseOptions(args []string, output io.Writer) (cliOptions, error) {
+	options := cliOptions{path: "testdata/test.exe"}
+	flags := flag.NewFlagSet("loupe", flag.ContinueOnError)
+	flags.SetOutput(output)
+	maxMiB := flags.Int64("max-file-size-mib", defaultMaxFileSizeMiB, "maximum input size in MiB (does not bound emulated memory)")
+	flags.Usage = func() {
+		fmt.Fprintln(output, "Usage: loupe [-max-file-size-mib N] [PE file]")
+		flags.PrintDefaults()
+	}
+	if err := flags.Parse(args); err != nil {
+		return options, err
+	}
+	if flags.NArg() > 1 {
+		return options, fmt.Errorf("expected at most one PE file path")
+	}
+	// Leave room for the extra byte used to detect a growing or oversized input.
+	maxInt := int64(^uint(0) >> 1)
+	if *maxMiB <= 0 || *maxMiB > (maxInt-1)/(1<<20) {
+		return options, fmt.Errorf("max-file-size-mib must be a positive value that fits this platform")
+	}
+	options.maxFileSize = *maxMiB << 20
+	if flags.NArg() == 1 {
+		options.path = flags.Arg(0)
+	}
+	return options, nil
+}
+
 func main() {
+	options, err := parseOptions(os.Args[1:], os.Stderr)
+	if err == flag.ErrHelp {
+		return
+	}
+	if err != nil {
+		log.Fatal(err)
+	}
 	fmt.Println("Initializing the emulator...")
 
 	// parse PE BEFORE creating unicorn
-	imageInfo, raw, err := parsePE("testdata/test.exe")
+	fmt.Printf("[pe] Reading %s (limit %d MiB)\n", options.path, options.maxFileSize>>20)
+	imageInfo, raw, err := parsePE(options.path, options.maxFileSize)
 	if err != nil {
 		log.Fatalf("Failed to parse PE file: %v", err)
 	}
+	printPEInfo(os.Stdout, imageInfo)
 
 	var mode int
 
@@ -341,21 +385,46 @@ func addAPIHook(uc unicorn.Unicorn, importTable ImportTable, importRegion MemReg
 }
 
 // ------------- PE File ---------------- //
-func parsePE(path string) (*ImageInfo, []byte, error) {
+func parsePE(path string, maxFileSize int64) (*ImageInfo, []byte, error) {
+	if maxFileSize <= 0 || maxFileSize >= int64(^uint(0)>>1) {
+		return nil, nil, fmt.Errorf("invalid input size limit")
+	}
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("failed to open PE file: %w", err)
 	}
 	defer f.Close()
-	raw, err := io.ReadAll(io.LimitReader(f, inspect.MaxFileSize+1))
+	stat, err := f.Stat()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("failed to stat PE file: %w", err)
+	}
+	if !stat.Mode().IsRegular() {
+		return nil, nil, fmt.Errorf("expected a regular PE file")
+	}
+	if stat.Size() > maxFileSize {
+		return nil, nil, fmt.Errorf("file exceeds %d MiB CLI limit; adjust -max-file-size-mib if needed", maxFileSize>>20)
+	}
+	raw, err := io.ReadAll(io.LimitReader(f, maxFileSize+1))
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to read PE file: %w", err)
+	}
+	if int64(len(raw)) > maxFileSize {
+		return nil, nil, fmt.Errorf("file exceeds %d MiB CLI limit; adjust -max-file-size-mib if needed", maxFileSize>>20)
 	}
 	image, err := inspect.Parse(raw)
 	if err != nil {
 		return nil, nil, err
 	}
 	return image, raw, nil
+}
+
+func printPEInfo(w io.Writer, image *ImageInfo) {
+	fmt.Fprintf(w, "[pe] Number of Sections in file %d\n", len(image.Sections))
+	fmt.Fprintf(w, "[pe] Image Base: 0x%x\n", image.ImageBase)
+	fmt.Fprintf(w, "[pe] Entry point of PE: 0x%x\n", image.EntryPointRVA)
+	for _, section := range image.Sections {
+		fmt.Fprintf(w, "[pe] Section name:%-8s - va:0x%x\n", section.Name, section.VirtualAddress)
+	}
 }
 
 func loadPESections(uc unicorn.Unicorn, raw []byte, imageInfo *ImageInfo) error {
