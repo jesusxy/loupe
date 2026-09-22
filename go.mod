@@ -1,4 +1,4 @@
-module loupe
+module github.com/jesusxy/loupe
 
 go 1.24.2
 

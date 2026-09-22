@@ -8,9 +8,9 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"loupe/inspect"
 	"os"
 
+	"github.com/jesusxy/loupe/inspect"
 	"github.com/unicorn-engine/unicorn/bindings/go/unicorn"
 )
 
